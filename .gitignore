@@ -1,0 +1,12 @@
+/build/
+/dist/
+/artifacts/
+/.deps/
+*.pkg
+*.elf
+*.oelf
+*.o
+*.prx
+*.sprx
+__pycache__/
+*.pyc
