@@ -70,7 +70,7 @@ static int player_period = PLAYER_PERIOD;
 static uint32_t library_preview[320*240];
 static int preview_width, preview_height;
 static int player_frontend_active;
-static char player_performance[128];
+static char player_performance[256];
 static void console_performance(const char *text) {
     snprintf(player_performance,sizeof(player_performance),"%s",text ? text : "");
 }
@@ -93,9 +93,9 @@ static int gb_render(const uint32_t *pixels, int count, const char *menu) {
     uint32_t *frame = frames[index];
 #ifdef VULKAN_PLAYER
     if (!menu) {
-        for(int i=0;i<1280*32;++i)frame[i]=0xff091119;
-        char performance[160];
-        snprintf(performance,sizeof(performance),"Vulkan 0.18 | %s",player_performance);
+        for(int i=0;i<1280*64;++i)frame[i]=0xff091119;
+        char performance[288];
+        snprintf(performance,sizeof(performance),"Vulkan 0.19 | %s",player_performance);
         draw_text_at(frame,36,10,performance,0xff5eead4);
         goto prepared;
     }

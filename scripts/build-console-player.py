@@ -38,6 +38,25 @@ for path in paths:
             code += '[System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]\n'
             code += f'private void initialize2_part_{i}() {{\n' + '\n'.join(chunk) + '\n}\n'
         code += '}\n}\n'
+    if path.endswith('/md_main.cs'):
+        old = """                if (g_masterSystemMode)
+                {
+                    g_md_z80?.ResetLineCycles();"""
+        new = """                if (g_masterSystemMode)
+                {
+                    long ps4CpuStart = Orbis.PerformanceProbe.Start();
+                    g_md_z80?.ResetLineCycles();"""
+        assert code.count(old) == 1
+        code = code.replace(old,new)
+        old = """                    g_md_vdp.run(vline);
+                    continue;"""
+        new = """                    Orbis.PerformanceProbe.Cpu(ps4CpuStart);
+                    long ps4VdpStart = Orbis.PerformanceProbe.Start();
+                    g_md_vdp.run(vline);
+                    Orbis.PerformanceProbe.Vdp(ps4VdpStart);
+                    continue;"""
+        assert code.count(old) == 1
+        code = code.replace(old,new)
     code = re.sub(r'(?:System\.)?Array.Empty<', 'Orbis.Framework.Empty<', code)
     code = re.sub(r'Array.Clear\(([^,;\n]+)\);',r'Array.Clear(\1, 0, \1.Length);',code)
     code = re.sub(r'ArgumentNullException.ThrowIfNull\((\w+)\);',lambda m: f'if ({m[1]} == null) throw new ArgumentNullException("{m[1]}");',code)
@@ -95,7 +114,7 @@ refs += [Path('/usr/lib/mono/4.5-api/Facades/System.IO.dll')]
 refs += [Path('/home/nichlas/.nuget/packages/nlayer/1.16.0/lib/netstandard1.3/NLayer.dll'),Path('/home/nichlas/.nuget/packages/sharpcompress/0.36.0/lib/net462/SharpCompress.dll')]
 host = out/'host';host.mkdir(exist_ok=True)
 cmd = ['dotnet',str(Path(sdkroot)/version/'Roslyn/bincore/csc.dll'),'-nologo','-nostdlib+','-nullable:annotations','-langversion:latest','-target:exe','-unsafe+','-platform:x64','-optimize+','-out:'+str(host/'main.exe')]
-result = subprocess.run(cmd+resources+['-r:'+str(p) for p in refs]+files+[str(root/'probes/gb/Compat.cs'),str(root/'probes/consoles/Compat.cs'),str(root/'probes/gb/Player.cs'),str(root/'probes/consoles/Backend.cs'),'-define:CONSOLE_PLAYER'],stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True)
+result = subprocess.run(cmd+resources+['-r:'+str(p) for p in refs]+files+[str(root/'probes/gb/Compat.cs'),str(root/'probes/consoles/Compat.cs'),str(root/'probes/gb/Player.cs'),str(root/'probes/consoles/Backend.cs'),str(root/'probes/consoles/PerformanceProbe.cs'),'-define:CONSOLE_PLAYER'],stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True)
 (out/'compile.log').write_text(result.stdout)
 print(result.stdout)
 if result.returncode: raise SystemExit(result.returncode)

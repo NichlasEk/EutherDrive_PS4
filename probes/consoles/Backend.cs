@@ -33,7 +33,9 @@ namespace Orbis {
         public void SetInputState(bool up,bool down,bool left,bool right,bool a,bool b,bool start,bool select) {
             core.SetInputState(up,down,left,right,a,b,false,start,false,false,false,select,PadType.SixButton);
         }
-        public void RunFrame() => core.RunFrame();
+        public void RunFrame() { PerformanceProbe.BeginFrame(); core.RunFrame(); }
+        public string PerformanceDetail => SystemName=="Master System" ? PerformanceProbe.Summary() : SystemName;
+        public void ResetPerformance() => PerformanceProbe.Reset();
         public ReadOnlySpan<short> ConsumeAudioBuffer() {
             int rate, channels;
             var audio = core.GetAudioBuffer(out rate,out channels);

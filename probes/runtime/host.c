@@ -21,7 +21,7 @@
 #elif defined(GB_PLAYER)
 #ifdef CONSOLE_PLAYER
 #ifdef VULKAN_PLAYER
-#define PROBE_TITLE "EutherDrive Vulkan 0.18"
+#define PROBE_TITLE "EutherDrive Vulkan 0.19"
 #else
 #define PROBE_TITLE "EutherDrive Consoles 0.15"
 #endif
@@ -180,13 +180,13 @@ static int start_vulkan(void) {
         return 0;
     }
     video=0; // GPU owns the real handle; this is only the frontend-ready marker.
-    draw_text(frames[0],30,"EutherDrive Vulkan 0.18 - Doom3 driver startup");
+    draw_text(frames[0],30,"EutherDrive Vulkan 0.19 - Doom3 driver startup");
     if (!ed_vk_present(frames[0],1280,720,0,0,1280,720,NULL)) {
         ed_vk_lost=1;
         report("FAIL Vulkan first frame %s result=%d",ed_vk_operation?ed_vk_operation:"unknown",(int)ed_vk_error);
         return 0;
     }
-    report("VULKAN ready: first GPU frame and flip completed 0.18");
+    report("VULKAN ready: first GPU frame and flip completed 0.19");
     return 1;
 }
 #endif

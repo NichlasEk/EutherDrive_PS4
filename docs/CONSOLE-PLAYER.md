@@ -1,8 +1,26 @@
-# EutherDrive Consoles — CPU 0.15 / Vulkan 0.18
+# EutherDrive Consoles — Vulkan 0.19 performance probe
 
-**Vulkan-test finns nu:** `dist/eutherdrive-vulkan-player-0.18.pkg`.
+**0.18 är nu fysiskt bekräftad med spelbild.** Fotot tyder på cirka 17,7 FPS,
+core 30,7 ms, audio 7,3 ms och video 18,0 ms. Avläsningen är ungefärlig.
+
+**0.19 är ett mätbygge**, med samma Doom3-drivrutin och emulering. Under den
+befintliga FPS/core/audio/video-raden visas SMS Z80/VDP och mix/queue/copy i ms.
+Z80/VDP mäts över var 32:a helbild (alla scanlines i den bilden); övriga mått
+är snitt över alla spelbilder sedan spelstart. Z80 inkluderar cykelschemaläggning
+runt Z80-körningen, VDP inkluderar scanline-rendering. De är delar av core.
+Mix är GetAudioBuffer, queue är kopiering/pinning/native omsampling och kö,
+copy är GetFrameBuffer inklusive formatkonvertering. De ersätter inte de
+övergripande måtten. Video innehåller fortfarande pacing och synkväntan.
+För Mega Drive/SNES visas ljud/bilddelningen men ingen SMS-intern CPU/VDP-siffra.
+HUD är nu 64 pixlar högt och kan täcka en del av spelbildens överkant.
+Fota båda rader efter cirka 30 sekunder i Alex Kidd. Ingen hastighetsvinst
+utlovas för detta mätbygge; det väljer nästa riktade optimering.
+
+
+**Aktuellt paket:** `dist/eutherdrive-vulkan-player-0.19.pkg`.
+0.18-paketet bevaras som fungerande baslinje.
 CPU-jämförelse: `dist/eutherdrive-console-player-0.15.pkg`. Båda paketen använder
-exakt samma managed assembly, ROM:ar och kontroller; den native grafikvägen skiljer.
+samma kärnrevision och ROM:ar. 0.19:s managed assembly har extra mätpunkter.
 0.16 och 0.17 startade inte på fysisk PS4 enligt användaren. 0.18 byter till
 Doom3-Ps4:s Vulkan/OpenGNM/PSBC-arkiv. ICD-hashen matchar Doom3 bundled 0.07:s
 build-info; arkiven låses av `scripts/doom3-vulkan.sha256`.

@@ -66,6 +66,8 @@ namespace Orbis {
             AudioFailed = false;
 #if CONSOLE_PLAYER
             long perfStart=System.Diagnostics.Stopwatch.GetTimestamp(), coreTicks=0, audioTicks=0, videoTicks=0;
+            long mixTicks=0, queueTicks=0, copyTicks=0;
+            emulator.ResetPerformance();
             int perfFrames=0;
             long lastPerf=perfStart;
             Performance("Measuring CPU / audio / video...");
@@ -94,6 +96,10 @@ namespace Orbis {
                 coreTicks+=phaseEnd-phaseStart; phaseStart=phaseEnd;
 #endif
                 var audio = emulator.ConsumeAudioBuffer();
+#if CONSOLE_PLAYER
+                long mixed=System.Diagnostics.Stopwatch.GetTimestamp();
+                mixTicks+=mixed-phaseStart;
+#endif
                 if (!AudioFailed && audio.Length > 0) {
                     if (audio.Length > Audio.Length) throw new Exception("Audio chunk too large");
                     audio.CopyTo(Audio.AsSpan());
@@ -107,9 +113,12 @@ namespace Orbis {
                 }
 #if CONSOLE_PLAYER
                 phaseEnd=System.Diagnostics.Stopwatch.GetTimestamp();
-                audioTicks+=phaseEnd-phaseStart; phaseStart=phaseEnd;
+                audioTicks+=phaseEnd-phaseStart; queueTicks+=phaseEnd-mixed; phaseStart=phaseEnd;
 #endif
                 uint[] pixels = emulator.Ppu.GetFrameBuffer();
+#if CONSOLE_PLAYER
+                copyTicks+=System.Diagnostics.Stopwatch.GetTimestamp()-phaseStart;
+#endif
                 var pin = GCHandle.Alloc(pixels, GCHandleType.Pinned);
                 try {
                     #if CONSOLE_PLAYER
@@ -128,7 +137,8 @@ namespace Orbis {
                     double ms=1000.0/frequency/perfFrames;
                     LastPerformance=string.Format("{0:F1} FPS | core {1:F1} audio {2:F1} video {3:F1} ms",
                         perfFrames*frequency/(now-perfStart),coreTicks*ms,audioTicks*ms,videoTicks*ms);
-                    Performance(LastPerformance);
+                    Performance(LastPerformance+"\n"+emulator.PerformanceDetail+
+                        string.Format(" | mix {0:F1} queue {1:F1} copy {2:F1} ms",mixTicks*ms,queueTicks*ms,copyTicks*ms));
                     lastPerf=now;
                 }
 #endif
@@ -320,6 +330,9 @@ namespace Orbis {
             sound.Write(System.Text.Encoding.ASCII.GetBytes("data")); sound.Write(size);
             if (nonzero == 0 || audioSamples < 1700000 || audioSamples > 1850000)
                 throw new Exception("Audio silent or wrong rate: " + audioSamples + " nonzero=" + nonzero);
+#if CONSOLE_PLAYER
+            Report("PROFILE "+emulator.PerformanceDetail);
+#endif
             Report("PASS audio samples=" + audioSamples + " nonzero=" + nonzero + " peak=" + peak);
             if (colors.Count < 2 || first == last) throw new Exception("ROM produced blank or unchanged output: colors=" + colors.Count + " " + emulator.GetDebugState());
             Report("PASS ROM 1200 frames, scripted Start/A; colors=" + colors.Count + " title=" + first.ToString("x8") + " final=" + last.ToString("x8"));

@@ -224,7 +224,7 @@ static void ed_vk_draw_texture(int index,int left,int top,int width,int height) 
 }
 static int ed_vk_present(const uint32_t *pixels,int width,int height,int left,int top,int scaled_width,int scaled_height,const uint32_t *hud) {
     if(ed_vk_lost || !ed_vk_ready)return 0;
-    if(!ed_vk_texture(0,pixels,width,height) || (hud && !ed_vk_texture(1,hud,1280,32)))return 0;
+    if(!ed_vk_texture(0,pixels,width,height) || (hud && !ed_vk_texture(1,hud,1280,64)))return 0;
 #ifndef ED_VK_OFFSCREEN
     ED_VK_TRY(vkResetFences(ed_vk_device,1,&ed_vk_acquire));
     uint32_t index;
@@ -245,7 +245,7 @@ static int ed_vk_present(const uint32_t *pixels,int width,int height,int left,in
     vkCmdBeginRenderPass(ed_vk_cmd,&pass,VK_SUBPASS_CONTENTS_INLINE);
     vkCmdBindPipeline(ed_vk_cmd,VK_PIPELINE_BIND_POINT_GRAPHICS,ed_vk_pipeline);
     ed_vk_draw_texture(0,left,top,scaled_width,scaled_height);
-    if(hud)ed_vk_draw_texture(1,0,0,1280,32);
+    if(hud)ed_vk_draw_texture(1,0,0,1280,64);
     vkCmdEndRenderPass(ed_vk_cmd);
     VkMemoryBarrier barrier={.sType=VK_STRUCTURE_TYPE_MEMORY_BARRIER,.srcAccessMask=VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,.dstAccessMask=VK_ACCESS_MEMORY_READ_BIT};
     vkCmdPipelineBarrier(ed_vk_cmd,VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,0,1,&barrier,0,NULL,0,NULL);

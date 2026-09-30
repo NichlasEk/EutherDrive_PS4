@@ -1,11 +1,10 @@
 # EutherDrive PS4 – startplan
 
-Aktuell testkandidat: **0.18 Vulkan med Doom3:s drivrutin**,
-[Master System / Mega Drive / SNES](docs/CONSOLE-PLAYER.md).
-0.13 fungerar på fysisk PS4 men går långsamt. Vulkan 0.16/0.17 startade inte.
-0.18 korrigerar en trasig SELF-konvertering och använder Doom3:s låsta
-Vulkan-bibliotek. Första GPU-frame/flip passerar i shadPS4; fysisk start och
-hastighet återstår att testa. CPU 0.15 finns kvar som jämförelse.
+**Vulkan 0.18 fungerar nu på fysisk PS4**, med Alex Kidd-spelbild bekräftad.
+Spelet går långsamt (cirka 18 FPS). **0.19 är nästa mätbygge**: separat
+Z80/VDP-, ljudmix/kö- och bildkopieringstid visas under FPS-raden för att
+lokalisera flaskhalsen. Doom3-drivrutinen och den rättade SELF-konverteringen
+behålls. [Master System / Mega Drive / SNES](docs/CONSOLE-PLAYER.md).
 Den nya appikonen är kvar.
 
 Aktuell fortsättning: [status och handoff 2026-09-29](docs/HANDOFF-2026-09-29.md).
