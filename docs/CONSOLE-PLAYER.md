@@ -1,5 +1,10 @@
 # EutherDrive Consoles — Vulkan 0.20 SMS fast path
 
+**Fysisk 0.20 kör men är fortfarande långsam enligt användarens test.**
+För fortsatt lokal iteration finns nu ett [repeterbart Mono-prestandatest](PERFORMANCE-WORKFLOW.md).
+shadPS4 når Vulkan men kan ännu inte starta denna Mono-runtime; inga spel-FPS
+har mätts där. Desktopresultat och PS4-resultat redovisas separat.
+
 **0.20 optimerar vanliga Sega SMS-ROM-läsningar.** Tvåpotensstora ROM:ar
 med avstängt cartridge RAM använder bitmasker och en kortare kodväg.
 Bankregistren läses fortfarande vid varje åtkomst; fast första 1 KiB,
