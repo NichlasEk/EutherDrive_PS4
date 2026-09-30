@@ -39,8 +39,8 @@ fi
 
 if [ "${ED_VULKAN_PLAYER:-0}" = 1 ]; then
     [ "${ED_CONSOLE_PLAYER:-0}" = 1 ] || { echo 'Vulkan needs ED_CONSOLE_PLAYER=1' >&2; exit 1; }
-    version=0.19
-    package_name=eutherdrive-vulkan-player-0.19.pkg
+    version=0.20
+    package_name=eutherdrive-vulkan-player-0.20.pkg
     title='EutherDrive Vulkan Test'
 fi
 

@@ -38,6 +38,11 @@ for path in paths:
             code += '[System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]\n'
             code += f'private void initialize2_part_{i}() {{\n' + '\n'.join(chunk) + '\n}\n'
         code += '}\n}\n'
+    if path.endswith('/md_z80_memory.cs'):
+        signature = '        private byte ReadSmsMemory(ushort a)'
+        assert code.count(signature) == 1
+        fast = (root/'probes/consoles/SmsReadFastPath.cs.txt').read_text()
+        code = code.replace(signature, fast + '        private byte ReadSmsMemoryOriginal(ushort a)')
     if path.endswith('/md_main.cs'):
         old = """                if (g_masterSystemMode)
                 {

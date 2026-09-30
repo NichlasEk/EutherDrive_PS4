@@ -1,4 +1,24 @@
-# EutherDrive Consoles — Vulkan 0.19 performance probe
+# EutherDrive Consoles — Vulkan 0.20 SMS fast path
+
+**0.20 optimerar vanliga Sega SMS-ROM-läsningar.** Tvåpotensstora ROM:ar
+med avstängt cartridge RAM använder bitmasker och en kortare kodväg.
+Bankregistren läses fortfarande vid varje åtkomst; fast första 1 KiB,
+ROM-wrapping och lässpårning bevaras. Övriga mapper-/RAM-fall använder
+originalfunktionen. Doom3-drivrutinen och Mono-inställningarna är samma.
+
+0.19-fotot visar ungefär 18,7 FPS, core 32,0 ms, audio 4,4 ms, video 17,0 ms;
+Z80 24,1 och VDP 9,4 ms är stickprov, mix 4,3, queue 0,1, copy 2,0 ms.
+Z80 inkluderar C#-kodens kostnad under PS4 Mono/JIT; mätningen isolerar inte
+JIT-kvalitet från emuleringsalgoritmen. Ingen slutsats att Mono är oskyldigt.
+
+820 279 direkta jämförelser av verklig ny/gammal minnesfunktion passerar,
+inklusive tracking, samtliga bankvärden, ROM-storleksbyten, icke-tvåpotensstorlek,
+cartridge av/på, RAM och Codemasters-fallback. Fem ROM:ar x1200 frames
+producerar samma 20 PPM/WAV-filer som 0.19. Desktop Mono mikromätning ABBA,
+4 miljoner läsningar: original 132,3/132,9 ms, snabb 99,8/98,6 ms (~25% mindre
+tid i denna begränsade minnesfunktion). Det är inte total FPS eller fysisk
+PS4-vinst. Jämför samma Alex Kidd-scen efter cirka 30 sekunder på konsolen.
+
 
 **0.18 är nu fysiskt bekräftad med spelbild.** Fotot tyder på cirka 17,7 FPS,
 core 30,7 ms, audio 7,3 ms och video 18,0 ms. Avläsningen är ungefärlig.
@@ -17,7 +37,7 @@ Fota båda rader efter cirka 30 sekunder i Alex Kidd. Ingen hastighetsvinst
 utlovas för detta mätbygge; det väljer nästa riktade optimering.
 
 
-**Aktuellt paket:** `dist/eutherdrive-vulkan-player-0.19.pkg`.
+**Aktuellt paket:** `dist/eutherdrive-vulkan-player-0.20.pkg`.
 0.18-paketet bevaras som fungerande baslinje.
 CPU-jämförelse: `dist/eutherdrive-console-player-0.15.pkg`. Båda paketen använder
 samma kärnrevision och ROM:ar. 0.19:s managed assembly har extra mätpunkter.

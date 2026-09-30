@@ -1,9 +1,9 @@
 # EutherDrive PS4 – startplan
 
 **Vulkan 0.18 fungerar nu på fysisk PS4**, med Alex Kidd-spelbild bekräftad.
-Spelet går långsamt (cirka 18 FPS). **0.19 är nästa mätbygge**: separat
+Spelet går långsamt (cirka 18 FPS). **0.20 testar en snabbare SMS-ROM-läsning**. Separat
 Z80/VDP-, ljudmix/kö- och bildkopieringstid visas under FPS-raden för att
-lokalisera flaskhalsen. Doom3-drivrutinen och den rättade SELF-konverteringen
+jämföra med 0.19-baslinjen. Doom3-drivrutinen och den rättade SELF-konverteringen
 behålls. [Master System / Mega Drive / SNES](docs/CONSOLE-PLAYER.md).
 Den nya appikonen är kvar.
 
