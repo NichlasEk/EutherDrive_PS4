@@ -105,3 +105,54 @@ Evidence: `build/benchmark-0.20-mono-all.log`,
 Getting full gameplay into shadPS4 remains a separate compatibility task:
 libkernel discovery alone is insufficient; Mono also needs libc and runtime
 services. Do not remove physical JIT/credential checks to mask this failure.
+
+## Repeatable Mono compatibility probe
+
+```sh
+python3 scripts/probe-shadps4-mono.py --timeout 25
+# Once a decrypted system module has been read from the user's console:
+python3 scripts/probe-shadps4-mono.py --sys-modules /path/to/private/module-dump
+```
+
+The tool creates a fresh build/stage/profile under `build/shadps4-mono/`.
+It compiles the existing small runtime test (arrays, Span, generics,
+exceptions, GC, timing, threads, native call and file IO), using the same
+packaged PS4 Mono PRX/BCL. It generates a distinctly labelled native
+diagnostic host, without the hardware credential/JIT preflight. Missing
+libkernel discovery is logged, not presented as a success; native P/Invoke
+still needs a real solution. The host explicitly labels the skipped preflight.
+Production source, physical package and USB are untouched.
+
+`--sys-modules` links only `libSceLibcInternal.sprx` into this fresh emulator
+profile. There is no such dump on this computer at the time of this check.
+The matching shadPS4 `src/core/linker.cpp` explicitly loads this file and
+initializes its allocator; absent it, shadPS4 falls back to incomplete HLE.
+Dumping this module is the next narrow experiment, not a guarantee of Mono
+support. Read it from the user's PS4 via a decrypt-capable FTP server when
+available. The user said FTP is off and can be enabled later; do not assume
+a connection/IP/port. See the [official shadPS4 setup guide](https://github.com/shadps4-emu/shadPS4/wiki/I.-Quick-start-%5BUsers%5D)
+for the distinction between ordinary FTP copies and decrypted dumps.
+
+The new probe was actually run without system modules on 2026-09-30:
+first GPU frame PASS, Mono load reached, then `sceLibcMspaceCreate`, `fwrite`
+and `abort` stubs were called, followed by exit 133. Tool exit 3 correctly
+reports no managed pass. Evidence: `build/shadps4-mono/20260930-105012/`.
+It records module/runtime hashes, checkpoints, *called* stubs and all unresolved
+imports separately in `result.json`. In this run 83 libc, 60 kernel and two
+RegMgr names were unresolved across the loaded modules; this does not mean
+every function is needed on the actual execution path.
+
+Among unresolved imports are `sceKernelJitCreateSharedMemory`,
+`sceKernelJitCreateAliasOfSharedMemory` and `sceKernelJitMapSharedMemory`.
+Their names exist in the matching shadPS4 symbol table, but implementations
+were not found. They will need investigation/implementation after startup
+advances; returning fake success is not sufficient. Shared RX/RW aliasing,
+execution, cleanup, threading and GC must actually work before ROM timings
+are meaningful.
+
+Even with the same PS4 Mono running, shadPS4 executes x86-64 guest code on the
+host CPU (see `RunMainEntry` in its linker). It does not reproduce a Jaguar
+CPU's cycle costs here. Thus this can improve runtime compatibility and
+code-path comparisons, but does not eliminate the need to profile the 19 FPS
+case on hardware. A corresponding physical stage/microbenchmark is needed
+to separate runtime/JIT cost from CPU and presentation costs.
