@@ -1,12 +1,17 @@
-# EutherDrive Consoles — CPU 0.15 / Vulkan 0.16
+# EutherDrive Consoles — CPU 0.15 / Vulkan 0.17
 
-**Vulkan-test finns nu:** `dist/eutherdrive-vulkan-player-0.16.pkg`.
+**Vulkan-test finns nu:** `dist/eutherdrive-vulkan-player-0.17.pkg`.
 CPU-jämförelse: `dist/eutherdrive-console-player-0.15.pkg`. Båda paketen använder
 exakt samma managed assembly, ROM:ar och kontroller; den native grafikvägen skiljer.
-0.16 är en experimentell variant. Den är byggd/paketvaliderad och shaderlogiken
-är GPU-testad på desktop; PS4-bild, stabilitet och hastighetsvinst återstår.
+Användaren rapporterar att 0.16 inte startade på fysisk PS4. Exakt fel och
+orsak är ännu okända. 0.17 matchar ScummVM:s `-z max-page-size=0x4000`
+(vårt tidigare ELF hade ett LOAD-segment med 0x1000 alignment), startar GPU
+före Mono och sparar bootstraploggar. Alla LOAD-segment granskas vid bygge.
+shadPS4 når `VULKAN ready` med shaderpipeline; sedan stoppar emulatorns
+befintliga libkernel/rättighetsbegränsning Mono-vägen. Shaderlogiken är också
+GPU-testad på desktop; fysisk PS4-start och hastighetsvinst återstår.
 
-0.15/0.16 visar FPS och core/audio/video-ms direkt under spelet, uppdaterat var
+0.15/0.17 visar FPS och core/audio/video-ms direkt under spelet, uppdaterat var
 annan sekund. Mätningen är genomsnittet sedan spelstart. Fota raden efter cirka
 30 sekunder i samma spel på båda versionerna. Stäng appen före paketbyte.
 Om core dominerar behöver själva C#-kärnan optimeras; GPU-skalning löser den
@@ -25,8 +30,8 @@ som inträffade på konsolen.
 Återanvänder lokala OpenGNM/vulkan-ps4/PSBC-arkiv från ut99-orbis. Arkivhashar
 sparas i paketet och byggkatalogen; källstacken ändras inte här. All grafik
 går genom Vulkan-API till OpenGNM/GNM; inga Piglet-/Shacc-beroenden.
-CPU-VideoOut stängs vid överlämning, varefter Vulkan äger utmatningen även
-för menyer. Spelbilden laddas upp i sin ursprungliga storlek som BGRA-textur,
+Vulkan startas före Mono, med ensam VideoOut-ägare från början, som i
+ScummVM-PS4:s ps4gl-main.c. CPU-buffertarna är vanliga uploadkällor. Spelbilden laddas upp i sin ursprungliga storlek som BGRA-textur,
 en nearest-filtershader skalar den med samma heltalsskala. Mätfältet är en
 separat liten textur. CPU:n skapar fortfarande emulatorernas spelbilder.
 

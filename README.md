@@ -1,10 +1,11 @@
 # EutherDrive PS4 – startplan
 
-Nya prestandakandidater: **0.15 CPU / 0.16 Vulkan**, [Master System / Mega Drive / SNES](docs/CONSOLE-PLAYER.md).
+Nya prestandakandidater: **0.15 CPU / 0.17 Vulkan**, [Master System / Mega Drive / SNES](docs/CONSOLE-PLAYER.md).
 0.13 är bekräftad fungerande på fysisk PS4 av användaren 2026-09-30,
-men spelen går mycket långsamt. 0.15/0.16 visar FPS och core/audio/video under
-spelet och korrigerar kontrollbitarnas felretur. 0.16 testar GPU-skalning med
-Vulkan/OpenGNM. Vulkan-shaderlogiken är desktop-GPU-verifierad; PS4-vinsten
+men spelen går mycket långsamt. 0.15/0.17 visar FPS och core/audio/video under
+spelet och korrigerar kontrollbitarnas felretur. 0.17 testar GPU-skalning med
+Vulkan/OpenGNM. 0.16 startade inte på konsolen. 0.17 följer ScummVM:s tidiga Vulkan-start
+och 16 KiB-länkning; shadPS4 når Vulkan ready. PS4-vinsten
 och stabiliteten återstår att mäta.
 Den nya appikonen är kvar.
 

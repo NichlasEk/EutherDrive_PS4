@@ -34,7 +34,15 @@ static struct EdVkTexture {
     unsigned char *mapped; VkSubresourceLayout sub;
     int width, height, initialized;
 } ed_vk_textures[2];
-#define ED_VK_TRY(call) do { ed_vk_operation=#call; ed_vk_error=(call); if(ed_vk_error!=VK_SUCCESS)return 0; } while(0)
+// Bootstrap breadcrumbs survive a driver crash, including calls that never return.
+static void ed_vk_checkpoint(const char *operation) {
+#ifndef ED_VK_OFFSCREEN
+    if (!ed_vk_ready) report("VULKAN init: %s",operation);
+#else
+    (void)operation;
+#endif
+}
+#define ED_VK_TRY(call) do { ed_vk_operation=#call; ed_vk_checkpoint(#call); ed_vk_error=(call); if(ed_vk_error!=VK_SUCCESS)return 0; } while(0)
 static uint32_t ed_vk_memory_type_flags(uint32_t bits,VkMemoryPropertyFlags required) {
     VkPhysicalDeviceMemoryProperties props;
     vkGetPhysicalDeviceMemoryProperties(ed_vk_physical,&props);
@@ -88,13 +96,14 @@ static int ed_vk_init(void) {
     VkInstanceCreateInfo instance={.sType=VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO};
     ED_VK_TRY(vkCreateInstance(&instance,NULL,&ed_vk_instance));
     uint32_t count=1;ED_VK_TRY(vkEnumeratePhysicalDevices(ed_vk_instance,&count,&ed_vk_physical));
-    if(count!=1 || !ed_vk_physical)return 0;
+    if(count!=1 || !ed_vk_physical) { ed_vk_error=VK_ERROR_INITIALIZATION_FAILED; return 0; }
     float priority=1;
     VkDeviceQueueCreateInfo queue={.sType=VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
         .queueFamilyIndex=0,.queueCount=1,.pQueuePriorities=&priority};
     VkDeviceCreateInfo device={.sType=VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,.queueCreateInfoCount=1,.pQueueCreateInfos=&queue};
     ED_VK_TRY(vkCreateDevice(ed_vk_physical,&device,NULL,&ed_vk_device));
     vkGetDeviceQueue(ed_vk_device,0,0,&ed_vk_queue);
+    if(!ed_vk_queue) { ed_vk_error=VK_ERROR_INITIALIZATION_FAILED; return 0; }
     // Native ICD owns VideoOut directly, like its tested fullscreen probes; no WSI loader.
 #ifndef ED_VK_OFFSCREEN
     VkSwapchainCreateInfoKHR swap={.sType=VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR,.minImageCount=2,

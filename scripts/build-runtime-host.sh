@@ -63,8 +63,24 @@ clang --target=x86_64-pc-freebsd12-elf -fPIC -funwind-tables -O2 \
     -DMONO_CREDENTIAL_PROBE $core_define -I"$jbc" -I"$vulkan_include" -I"$gnm_include" -Wall -Wextra -Werror -Wno-unused-function \
     -isysroot "$toolchain" -isystem "$toolchain/include" \
     -c "$project_dir/probes/runtime/host.c" -o "$output/host.o"
-ld.lld -m elf_x86_64 -pie --script "$toolchain/link.x" --eh-frame-hdr \
+ld.lld -m elf_x86_64 -pie -z max-page-size=0x4000 --script "$toolchain/link.x" --eh-frame-hdr \
     -L"$toolchain/lib" "$output/host.o" "$jbc/libut99-jbc.a" "$toolchain/lib/crt1.o" \
     --start-group -lc -lkernel -lSceVideoOut -lSceSysmodule "$@" --end-group -o "$output/host.elf"
+# PS4 maps 16 KiB pages. Match ScummVM's linker maximum page size and
+# reject a future linker/toolchain change that emits 4 KiB LOAD alignment.
+python3 - "$output/host.elf" <<'PYELF'
+import struct, sys
+with open(sys.argv[1], 'rb') as elf:
+    header=elf.read(64)
+    assert header[:6]==b'\x7fELF\x02\x01'
+    offset=struct.unpack_from('<Q',header,32)[0]
+    size,count=struct.unpack_from('<HH',header,54)
+    for i in range(count):
+        elf.seek(offset+i*size)
+        kind,flags,file_offset,address,physical,file_size,memory_size,alignment=struct.unpack('<IIQQQQQQ',elf.read(56))
+        if kind==1:
+            assert alignment>=0x4000 and (file_offset-address)%0x4000==0, 'PS4 LOAD page alignment'
+print('PASS PS4 ELF LOAD segments use 16 KiB alignment')
+PYELF
 "$toolchain/bin/linux/create-fself" -in="$output/host.elf" \
     -out="$output/host.oelf" --eboot "$output/eboot.bin" --paid 0x3800000000000011

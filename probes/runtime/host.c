@@ -21,7 +21,7 @@
 #elif defined(GB_PLAYER)
 #ifdef CONSOLE_PLAYER
 #ifdef VULKAN_PLAYER
-#define PROBE_TITLE "EutherDrive Vulkan 0.16"
+#define PROBE_TITLE "EutherDrive Vulkan 0.17"
 #else
 #define PROBE_TITLE "EutherDrive Consoles 0.15"
 #endif
@@ -128,7 +128,11 @@ static void report(const char *format, ...) {
             offset += (size_t)written;
         }
 #ifdef CONSOLE_PLAYER
+#ifdef VULKAN_PLAYER
+        if (failed || !ed_vk_ready) sceKernelFsync(logfile);
+#else
         if (failed) sceKernelFsync(logfile);
+#endif
 #else
         sceKernelFsync(logfile);
 #endif
@@ -164,18 +168,19 @@ static void init_video(void) {
 static int start_vulkan(void) {
     if (ed_vk_ready) return !ed_vk_lost;
     if (ed_vk_lost) return 0;
-    report("VULKAN begin; handing VideoOut to OpenGNM");
-    if (video >= 0) sceVideoOutClose(video);
+    report("VULKAN bootstrap before Mono; OpenGNM owns VideoOut");
+    extern void vk_ps4_log_open(const char *);
+    vk_ps4_log_open("/data/eutherdrive-ps4/vulkan-bootstrap.log");
     video=-1;
     if (!ed_vk_init()) {
         ed_vk_lost=1;
         // Initialization failure: retain partial GPU resources and show CPU diagnostics.
-        init_video();
+        if (!ed_vk_swap) init_video();
         report("FAIL Vulkan init %s result=%d",ed_vk_operation?ed_vk_operation:"unknown",(int)ed_vk_error);
         return 0;
     }
     video=0; // GPU owns the real handle; this is only the frontend-ready marker.
-    report("VULKAN ready: GPU nearest texture scaling 0.16");
+    report("VULKAN ready: GPU nearest texture scaling 0.17");
     return 1;
 }
 #endif
@@ -491,9 +496,25 @@ int main(void) {
     logfile = sceKernelOpen("/data/eutherdrive-ps4/native-probe.log", O_WRONLY | O_CREAT | O_TRUNC, 0666);
 #endif
     report(PROBE_TITLE " - native log start");
+#ifdef VULKAN_PLAYER
+    // ScummVM bootstraps its GPU owner before SDL/application threads. These
+    // CPU drawing buffers are upload sources, never registered with VideoOut.
+    frames[0]=calloc(2u*1280u*720u,sizeof(uint32_t));
+    if (!frames[0]) {
+        init_video();
+        report("FAIL Vulkan CPU upload buffer allocation");
+        goto stopped;
+    }
+    frames[1]=frames[0]+1280*720;
+    if (!start_vulkan()) goto stopped;
+#else
     init_video();
+#endif
     if (logfile < 0) report("WARN native log open failed: 0x%08x", (unsigned)logfile);
     run();
+#ifdef VULKAN_PLAYER
+stopped:
+#endif
 #ifdef CONSOLE_PLAYER
     player_frontend_active = 0;
 #endif
