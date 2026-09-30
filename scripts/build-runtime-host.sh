@@ -31,6 +31,8 @@ if [ "${ED_GB_PLAYER:-0}" = 1 ]; then
     "$output/test-ui"
     cc -Wall -Wextra -Werror -pthread -DSMS_PLAYER "$project_dir/probes/runtime/test-gb-ui.c" -o "$output/test-sms-ui"
     "$output/test-sms-ui"
+    cc -Wall -Wextra -Werror -pthread -DCONSOLE_PLAYER "$project_dir/probes/runtime/test-gb-ui.c" -o "$output/test-console-ui"
+    "$output/test-console-ui"
 fi
 cc -Wall -Wextra -Werror -I"$jbc" "$project_dir/probes/runtime/test-credential-probe.c" -o "$output/test-credentials"
 "$output/test-credentials"

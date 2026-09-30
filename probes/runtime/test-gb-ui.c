@@ -47,6 +47,19 @@ static void draw_text_at(uint32_t *frame, int x, int y, char *text, uint32_t col
 static void draw_text_at(uint32_t *pixels, int x, int y, char *text, uint32_t color) { (void)x; (void)color; draw_text(pixels,y,text); }
 #endif
 #include "gb-player.h"
+static void check_console_image(int width, int height) {
+    static uint32_t image[640*480];
+    for(int i=0;i<width*height;++i) image[i]=0xff000000u | (unsigned)(i*2654435761u);
+    assert(console_present(image,width*height,width,height,16667));
+    uint32_t *shown=storage[(sequence-1)%2];
+    for(int y=0;y<720;++y)for(int x=0;x<1280;++x) {
+        uint32_t expected=0xff102020;
+        if(x>=player_left && x<player_left+width*player_scale &&
+           y>=player_top && y<player_top+height*player_scale)
+            expected=image[((y-player_top)/player_scale)*width+(x-player_left)/player_scale];
+        assert(shown[y*1280+x]==expected);
+    }
+}
 int main(void) {
     assert(gb_input()==0x4000);
     pad_connected=0; assert(gb_input()==0);
@@ -90,6 +103,14 @@ int main(void) {
     assert(preview_width==320 && preview_height==240);
 #endif
     assert(console_preview(NULL,0,0,0));
+    check_console_image(256,192);
+    check_console_image(320,224);
+    check_console_image(256,224);
+    check_console_image(320,240);
+    check_console_image(640,480);
+#ifdef UI_BENCHMARK
+    for(int i=0;i<1000;++i)assert(console_present(console_pixels,320*224,320,224,16667));
+#endif
     gb_close(); assert(gb_pad==-1);
     puts("PASS UI: frame bounds, GB/SMS/MD sizes, PAL timing, previews, buffer rotation, pad disconnect");
 }

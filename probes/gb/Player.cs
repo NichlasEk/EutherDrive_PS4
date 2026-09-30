@@ -20,7 +20,7 @@ namespace Orbis {
         #if CONSOLE_PLAYER
         private static int Width => Emulator.Width;
         private static int Height => Emulator.Height;
-        private const string SystemName = "Master System / Mega Drive / SNES", Version = "0.13";
+        private const string SystemName = "Master System / Mega Drive / SNES", Version = "0.14";
         private static bool Supports(string ext) => new[] { ".sms", ".md", ".gen", ".smd", ".sfc", ".smc" }.Contains(ext);
         [MethodImpl(MethodImplOptions.InternalCall)] private static extern int NativePreview(IntPtr pixels, int count, int width, int height);
         [MethodImpl(MethodImplOptions.InternalCall)] private static extern int NativePresentFrame(IntPtr pixels, int count, int width, int height, int period);
@@ -35,6 +35,9 @@ namespace Orbis {
 #endif
         private static bool Muted;
         private static bool AudioFailed;
+#if CONSOLE_PLAYER
+        private static string LastPerformance = "";
+#endif
         private static readonly short[] Audio = new short[16384];
         private sealed class Game { public string Name, Path; }
         [MethodImpl(MethodImplOptions.NoInlining)]
@@ -50,6 +53,10 @@ namespace Orbis {
         private static void Play(Emulator emulator) {
             int previous = NativeInput();
             AudioFailed = false;
+#if CONSOLE_PLAYER
+            long perfStart=System.Diagnostics.Stopwatch.GetTimestamp(), coreTicks=0, audioTicks=0, videoTicks=0;
+            int perfFrames=0;
+#endif
             while (true) {
                 int keys = NativeInput();
                 if (keys < 0) throw new Exception("Controller read failed");
@@ -65,7 +72,14 @@ namespace Orbis {
                     (keys & 0x80) != 0, (keys & 0x20) != 0, (keys & 0x4000) != 0,
                     (keys & 0x2000) != 0, (keys & 8) != 0, (keys & 0x8000) != 0);
 #endif
+#if CONSOLE_PLAYER
+                long phaseStart=System.Diagnostics.Stopwatch.GetTimestamp();
+#endif
                 emulator.RunFrame();
+#if CONSOLE_PLAYER
+                long phaseEnd=System.Diagnostics.Stopwatch.GetTimestamp();
+                coreTicks+=phaseEnd-phaseStart; phaseStart=phaseEnd;
+#endif
                 var audio = emulator.ConsumeAudioBuffer();
                 if (!AudioFailed && audio.Length > 0) {
                     if (audio.Length > Audio.Length) throw new Exception("Audio chunk too large");
@@ -78,6 +92,10 @@ namespace Orbis {
                         }
                     } finally { audioPin.Free(); }
                 }
+#if CONSOLE_PLAYER
+                phaseEnd=System.Diagnostics.Stopwatch.GetTimestamp();
+                audioTicks+=phaseEnd-phaseStart; phaseStart=phaseEnd;
+#endif
                 uint[] pixels = emulator.Ppu.GetFrameBuffer();
                 var pin = GCHandle.Alloc(pixels, GCHandleType.Pinned);
                 try {
@@ -88,7 +106,21 @@ namespace Orbis {
 #endif
                         throw new Exception("Video presentation failed");
                 } finally { pin.Free(); }
+#if CONSOLE_PLAYER
+                videoTicks+=System.Diagnostics.Stopwatch.GetTimestamp()-phaseStart;
+                ++perfFrames;
+#endif
             }
+#if CONSOLE_PLAYER
+            if(perfFrames>0) {
+                double frequency=System.Diagnostics.Stopwatch.Frequency;
+                double seconds=(System.Diagnostics.Stopwatch.GetTimestamp()-perfStart)/frequency;
+                double ms=1000.0/frequency/perfFrames;
+                LastPerformance=string.Format("{0:F1} FPS | core {1:F1} audio {2:F1} video {3:F1} ms",
+                    perfFrames/seconds,coreTicks*ms,audioTicks*ms,videoTicks*ms);
+                Report("PERF "+emulator.SystemName+" "+LastPerformance);
+            }
+#endif
         }
         [MethodImpl(MethodImplOptions.NoInlining)]
         private static void ToggleMute() { Muted = !Muted; NativeMute(Muted || AudioFailed ? 1 : 0); }
@@ -184,6 +216,9 @@ namespace Orbis {
                             Play(emulator);
                         }
                         status = "Returned to library. Game restarts when selected.";
+#if CONSOLE_PLAYER
+                        status=LastPerformance;
+#endif
                     } catch (Exception error) {
                         status = "Game stopped: " + error.Message;
                         Report("WARN game stopped: " + error);

@@ -1,8 +1,9 @@
 # EutherDrive PS4 – startplan
 
-Ny konsolversion: **0.13 med uppdelad M68K-initiering**, [Master System / Mega Drive / SNES](docs/CONSOLE-PLAYER.md).
+Ny prestandakandidat: **0.14**, [Master System / Mega Drive / SNES](docs/CONSOLE-PLAYER.md).
 0.13 är bekräftad fungerande på fysisk PS4 av användaren 2026-09-30,
-men spelen går mycket långsamt. Nästa steg är prestandamätning och optimering.
+men spelen går mycket långsamt. 0.14 minskar loggnings-/bildkostnader och visar
+FPS samt core/audio/video-tider efter L1+R1. Konsolvinsten återstår att mäta.
 Den nya appikonen är kvar.
 
 Aktuell fortsättning: [status och handoff 2026-09-29](docs/HANDOFF-2026-09-29.md).

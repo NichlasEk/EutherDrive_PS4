@@ -55,6 +55,7 @@ static int player_scale = PLAYER_SCALE, player_left = PLAYER_LEFT, player_top = 
 static int player_period = PLAYER_PERIOD;
 static uint32_t library_preview[320*240];
 static int preview_width, preview_height;
+static int player_frontend_active;
 static int console_preview(const uint32_t *pixels, int count, int width, int height) {
     if (!pixels && count==0) { preview_width=preview_height=0; return 1; }
     if (!pixels || width<1 || width>320 || height<1 || height>240 || count!=width*height) return 0;
@@ -65,14 +66,21 @@ static int console_preview(const uint32_t *pixels, int count, int width, int hei
 static int gb_render(const uint32_t *pixels, int count, const char *menu) {
     if ((!menu && (!pixels || count != player_width * player_height)) || video < 0 || !frames[0]) return 0;
     while (__atomic_test_and_set(&report_busy, __ATOMIC_ACQUIRE)) sceKernelUsleep(1000);
+    player_frontend_active = 1;
     int index = sequence % 2;
     ++sequence;
     uint32_t *frame = frames[index];
     for (int i = 0; i < 1280 * 720; ++i) frame[i] = menu ? 0xff091119 : 0xff102020;
     if (!menu) {
-        for (int y = 0; y < player_height * player_scale; ++y)
-            for (int x = 0; x < player_width * player_scale; ++x)
-                frame[(y + player_top) * 1280 + x + player_left] = pixels[(y / player_scale) * player_width + x / player_scale];
+        for (int y = 0; y < player_height; ++y) {
+            uint32_t *row = frame + (y * player_scale + player_top) * 1280 + player_left;
+            const uint32_t *source = pixels + y * player_width;
+            for (int x = 0; x < player_width; ++x)
+                for (int repeat = 0; repeat < player_scale; ++repeat)
+                    row[x * player_scale + repeat] = source[x];
+            for (int repeat = 1; repeat < player_scale; ++repeat)
+                memcpy(row + repeat * 1280, row, (size_t)player_width * player_scale * sizeof(uint32_t));
+        }
 #if defined(SMS_PLAYER) || defined(CONSOLE_PLAYER)
 #ifndef CONSOLE_PLAYER
         draw_text_at(frame, 30, 40, "EutherDrive", 0xff5eead4);

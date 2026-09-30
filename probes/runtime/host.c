@@ -20,7 +20,7 @@
 #define PROBE_TITLE "EutherDrive Native JIT Rights 0.05"
 #elif defined(GB_PLAYER)
 #ifdef CONSOLE_PLAYER
-#define PROBE_TITLE "EutherDrive Consoles 0.13"
+#define PROBE_TITLE "EutherDrive Consoles 0.14"
 #elif defined(SMS_PLAYER)
 #define PROBE_TITLE "EutherDrive Master System 0.10"
 #else
@@ -111,9 +111,17 @@ static void report(const char *format, ...) {
             remaining -= (size_t)written;
             offset += (size_t)written;
         }
+#ifdef CONSOLE_PLAYER
+        if (failed) sceKernelFsync(logfile);
+#else
         sceKernelFsync(logfile);
+#endif
     }
+#ifdef CONSOLE_PLAYER
+    if (!player_frontend_active || failed) display();
+#else
     display();
+#endif
     __atomic_clear(&report_busy, __ATOMIC_RELEASE);
 }
 
@@ -303,7 +311,13 @@ static void enable_mono_diagnostics(int mono) {
     void (*set_print)(void (*)(const char *, int)) = NULL;
     void (*set_error)(void (*)(const char *, int)) = NULL;
     if (sceKernelDlsym(mono, "mono_trace_set_level_string", (void **)&set_level) >= 0 && set_level)
-        set_level("debug");
+        set_level(
+#ifdef CONSOLE_PLAYER
+            "warning"
+#else
+            "debug"
+#endif
+        );
     if (sceKernelDlsym(mono, "mono_trace_set_print_handler", (void **)&set_print) >= 0 && set_print)
         set_print(mono_print);
     if (sceKernelDlsym(mono, "mono_trace_set_printerr_handler", (void **)&set_error) >= 0 && set_error)
@@ -440,6 +454,10 @@ int main(void) {
     init_video();
     if (logfile < 0) report("WARN native log open failed: 0x%08x", (unsigned)logfile);
     run();
+#ifdef CONSOLE_PLAYER
+    player_frontend_active = 0;
+#endif
     report("Probe stopped. Photograph screen; close with PS button.");
+    if (logfile >= 0) sceKernelFsync(logfile);
     for (;;) sceKernelUsleep(1000000);
 }

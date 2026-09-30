@@ -32,8 +32,8 @@ if [ "${ED_SMS_PLAYER:-0}" = 1 ]; then
 fi
 
 if [ "${ED_CONSOLE_PLAYER:-0}" = 1 ]; then
-    version=0.13
-    package_name=eutherdrive-console-player-0.13.pkg
+    version=0.14
+    package_name=eutherdrive-console-player-0.14.pkg
     title='EutherDrive Consoles'
 fi
 

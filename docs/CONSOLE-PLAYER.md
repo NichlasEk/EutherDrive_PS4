@@ -1,4 +1,23 @@
-# EutherDrive Consoles 0.13
+# EutherDrive Consoles 0.14 — prestandakandidat
+
+0.13 är den fysiskt fungerande baslinjen, commit `b094d84`. 0.14 minskar
+Mono-loggnivån från debug till warning, undviker per-rad fsync och extra
+diagnostik-flips när frontenden är aktiv. Loggar och fel finns kvar;
+slutrapporten synkas efter normal nedstängning. Bildskalningen expanderar en
+källrad och kopierar upprepade rader i stället för division per utpixel.
+Pixel-för-pixel-kontroll av hela 1280x720-bilden passerar för SMS/MD/SNES och
+640x480, inklusive kanter och bakgrund.
+
+Tre alternerade desktopkörningar av 1000 native-renderingar gav median
+2,408 s före och 0,525 s efter (4,58x för den avgränsade renderingsvägen).
+Mockad VideoOut/audio används: resultatet är **inte** fysisk PS4-FPS eller
+kärnans hastighet. Ingen frame-skipping eller ändrad emuleringstiming införs.
+
+Spela cirka 30 sekunder per system och återgå med L1+R1. Bibliotekets statusrad
+visar genomsnittlig FPS och core/audio/video ms per bild. Core inkluderar
+adapterns RunFrame; audio inkluderar PCM-hämtning/kopiering och kömatning;
+video inkluderar framebufferkonvertering, skalning och pacing/vsync-väntan.
+Återstående flaskhals och verklig hastighetsvinst kräver fysisk återkoppling.
 
 På fysisk PS4 startar 0.12:s UI, men ROM-start stoppas med ett fel som börjar
 `Method EutherDrive.Core.MdTracerCore.md_m68k:ini...`. Resten klipptes av UI:t.
@@ -43,7 +62,7 @@ ZIP-/specialchip-/BIOS-spel är inte verifierade genom dessa tester.
 Ett tidigare byggt libjbc kan användas med
 `ED_JBC_DIR=/home/nichlas/ut99-orbis/build/ps4-usb`.
 
-Utdata: `dist/eutherdrive-console-player-0.13.pkg`, samma title ID
+Utdata: `dist/eutherdrive-console-player-0.14.pkg`, samma title ID
 `EDRM00001` som tidigare tester. Installation ersätter den installerade
 GB-testappen. De äldre PKG-filerna bevaras; GB-regressionen förblir körbar.
 Paketet innehåller användarens ROM:ar och är inte en offentlig release.
