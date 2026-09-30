@@ -1,0 +1,6 @@
+# Skip intro, enter menus, then confirm character with Start.
+600 610 64
+900 910 64
+1050 1060 64
+1500 1510 64
+1801 2100 8

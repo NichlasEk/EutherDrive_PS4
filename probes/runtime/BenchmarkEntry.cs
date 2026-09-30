@@ -16,7 +16,7 @@ namespace MonoBenchmark {
         }
         public static void Main() {
             try {
-                Benchmark.Run(new string[] { "@ROM@", "300", "@FRAMES@" });
+                Benchmark.Run(new string[] { "@ROM@", "@WARMUP@", "@FRAMES@", "@INPUT@", "/data/eutherdrive-ps4/benchmark-last.ppm" });
                 File.WriteAllText("/data/eutherdrive-ps4/benchmark-result.log", "RESULT PASS\n");
                 Log("RESULT PASS");
             } catch (Exception e) { Log("BENCHFAIL " + e); throw; }

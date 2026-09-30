@@ -1,10 +1,14 @@
 # Performance iteration, 2026-09-30
 
+The patched emulator now runs managed gameplay benchmarks; see the measured
+scenes and cross-runtime comparison at the end of this document. The earlier
+unpatched startup failures below are retained as history.
+
 The user tested 0.20 on PS4: it runs, but is still far from 60 FPS.
 There is no numerical 0.20 hardware measurement yet. The 0.19 photo showed
 about 18.7 FPS, core 32.0 ms, audio 4.4 ms and video 17.0 ms.
 
-## shadPS4 is currently blocked before managed gameplay
+## Historical baseline: unpatched shadPS4 blocked before managed gameplay
 
 Version 0.18.0, revision `e3ce810f3a653f43ac64ebab63023de281a4103a`,
 successfully presents the first native Vulkan frame, then the normal host
@@ -193,3 +197,126 @@ presentation and use the host CPU; they do not reproduce the physical PS4's
 Repeat `20260930-122952` gave 97.19 pipeline / 95.60 wall FPS with the same
 hashes and counts. Final twelve-test runtime run:
 `build/shadps4-mono/20260930-123135-sjlqtyvk/` (PASS).
+
+### Verify the scene before comparing gameplay throughput
+
+The short legacy input sequence can finish on a title screen or intro. A complete
+ROM run and matching hashes establish reproducibility, not active gameplay.
+New captures identified Sonic's title screen, Black Belt's title screen, Streets
+of Rage 2's story and Zelda's Triforce intro in that 300+300-frame sequence.
+Keep those measurements separate from the gameplay replays below.
+
+`probes/consoles/inputs/` contains plain-text deterministic controller replays.
+Each non-comment row is `first_frame last_frame button_mask`, inclusive, with
+U=1, D=2, L=4, R=8, A=16, B=32, START=64 and SELECT=128. Overlapping rows combine
+buttons. An explicit replay replaces the legacy default input sequence.
+Both runtime harnesses read the same format and record the replay SHA-256.
+
+```sh
+SHADPS4="$PWD/build/shadps4-dev/shadps4" SHADPS4_EXPERIMENTAL_MONO=1 \
+  python3 scripts/probe-shadps4-mono.py --jit-preflight \
+    --benchmark-rom build/console-player/rom02/game.md \
+    --benchmark-input probes/consoles/inputs/sonic1.txt \
+    --benchmark-warmup 1200 --benchmark-frames 300 --timeout 180
+python3 scripts/benchmark-console-player.py build/console-player/rom02/game.md \
+  --input probes/consoles/inputs/sonic1.txt --warmup 1200 --frames 300 --repeats 2
+```
+
+Both harnesses save `benchmark-last.ppm` after all timed work and reported GC
+counts: under the private guest data directory in shadPS4 and under each
+`run-NN` evidence directory on desktop. Inspect that image to
+verify the actual scene. Capturing adds no work to the measured interval.
+Frame/input/ROM/player hashes let the host and PS4 Mono runs be compared without
+confusing different scenes or builds. These are still core/audio/framebuffer
+benchmarks, without timed GPU presentation or native audio output.
+
+### Interpreting the physical PS4 gap
+
+The old 0.19 photograph reports about 18.7 FPS, with sampled SMS Z80 time
+24.1 ms and VDP 9.4 ms. Even the Z80 component exceeds the entire 16.67 ms
+budget for 60 FPS. Those sampled substage times need not sum exactly to the
+whole-frame averages. The reported video stage can also contain presentation
+waiting; its 17 ms is not a measurement of GPU execution alone.
+
+The guest and desktop benchmarks execute on the same Xeon E5-2697 v3 host.
+They separate a large runtime-path regression from core workload much better
+than a title-screen FPS comparison, but neither recreates the PS4 CPU or its
+native kernel/audio/video costs. No CPU clock setting or GPU-driver change is
+justified by this comparison alone.
+
+The next hardware discriminator is the same ROM/player/replay and measured
+frame range using the benchmark on the physical console, initially without
+native presentation/audio output. Keep hashes, core/audio/copy times, p95 and
+GC counts. Then add the production output path back and measure its waits
+separately. This distinguishes compute cost from platform output stalls.
+No such physical benchmark has been run in this measurement round.
+
+### Measured scenes and cross-runtime comparison, 2026-09-30
+
+Sequential runs on Intel Xeon E5-2697 v3 @ 2.60 GHz, the unchanged production
+player `ea9c9340a4c7ae20bc30da58216ef4b042d429fcdd2c35dcb23fc70b0ea333d9`,
+and experimental shadPS4 executable
+`d0c25f626a62d8fdc1f6fe759304c6d2b455fe6bea63c431ba0c1493b2a1b8af`.
+Desktop runtime: Mono 6.12.0. Each run measures 300 frames after the listed
+warmup; these are short throughput samples, not sustained interactive FPS.
+The scene column identifies the inspected final framebuffer.
+
+| Game | Final scene | Warmup | PS4 Mono in shadPS4 FPS | Desktop Mono FPS (two runs) | Full pixel/audio hashes |
+|---|---|---:|---:|---:|---|
+| Black Belt | Chapter 1 combat | 1200 | 86.99 | 91.47 / 91.08 | Match |
+| Alex Kidd | First stage, underwater | 1200 | 94.67 | 99.58 / 100.02 | Match |
+| Sonic 1 | Green Hill Zone | 1200 | 61.78 | 70.61 / 68.99 | Match |
+| Streets of Rage 2 | Stage 1 combat | 1800 | 62.93 | 70.06 / 69.79 | Match |
+| Zelda | Opening room/dialogue | 3000 | 27.23 | 35.05 / 35.48 | **Differ — unresolved** |
+
+For the four Sega games, ROM SHA-256, player SHA-256, replay SHA-256, warmup,
+frame count, complete video/audio hashes and sample/nonzero counts all match
+between runtimes and both desktop repeats. An earlier Alex Kidd run gave
+93.21 FPS with the same complete output hashes; the final replay has a corrected
+comment and the repeat above confirms its new file hash. No core optimization
+or physical package change was made in this round.
+
+Zelda is reproducible within desktop Mono, but **not cross-runtime validated**:
+PS4 Mono produces video `f513d40d` / audio `eadfe306`, desktop produces
+video `341432fd` / audio `086c51b0`. Both report 440278 samples, 439744 nonzero.
+A third desktop run (`build/benchmarks/20260930-130430/`, 34.76 FPS) confirms
+the same hashes and captures the same opening room/dialogue. Comparing its
+final RGB capture with the guest capture finds 20241 of 57344 pixels different;
+every differing channel is exactly one level brighter on desktop. That is a
+precise numeric/rendering discrepancy, not evidence of a different scene. Its
+cause and the audio discrepancy remain unresolved; do not treat the FPS ratio
+as an approved optimization baseline. PPU brightness-table rounding is a
+candidate to test, not an identified fault.
+
+The Zelda guest run spends 36.108 ms/frame in RunFrame (including SNES audio
+generation), 0.001 ms retrieving sound and 0.610 ms copying pixels. It reports
+123 generation-0 collections versus 33 on desktop; counts do not measure GC
+time or prove that garbage collection explains the performance gap.
+
+For Sega, the PS4-runtime throughput is roughly 5–12% below the mean desktop
+throughput here. This includes emulator/HLE differences and is not an isolated
+measurement of Mono overhead. It does not explain or reproduce the several-fold
+physical-console gap. Keep the physical test described above as the next
+discriminator; do not infer real PS4 performance from these host measurements.
+
+Local evidence (ignored build artifacts, no ROM data committed):
+
+| Game | Guest result.json directory | Desktop manifest.json directory |
+|---|---|---|
+| Black Belt | `build/shadps4-mono/20260930-124602-n2ln97kg` | `build/benchmarks/20260930-125836` |
+| Alex Kidd | `build/shadps4-mono/20260930-130604-gtgl14gl` | `build/benchmarks/20260930-125910` |
+| Sonic 1 | `build/shadps4-mono/20260930-124510-qy223ehw` | `build/benchmarks/20260930-125945` |
+| Streets of Rage 2 | `build/shadps4-mono/20260930-125712-2aqp2xsa` | `build/benchmarks/20260930-130031` |
+| Zelda | `build/shadps4-mono/20260930-124952-zna6v65o` | `build/benchmarks/20260930-130131` |
+
+Each guest directory retains generated benchmark source, staged replay, runtime
+logs, result.json and its final PPM. The new desktop capture lives in run-00 of
+the third Zelda run; earlier desktop comparisons predate automatic captures.
+Sonic's early result lacks the harness hash field, but its generated source is
+retained. Later harness changes moved capture to shared code after timing; the
+final Alex guest and Zelda desktop reruns verify unchanged output signatures.
+
+Rejected scene attempts are retained: SoR2 `20260930-124645-3987o0dz` stopped
+on a silent menu (benchmark correctly failed); `20260930-124818-sxbdh2lu` and
+`20260930-125228-yczxjiio` ended at character selection. Their FPS numbers are
+not gameplay baselines. The accepted replay confirms the character at frame1500.

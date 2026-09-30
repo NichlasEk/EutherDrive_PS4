@@ -1,0 +1,2 @@
+# Wait for title, start with button 1. No directional input during measurement.
+600 610 16

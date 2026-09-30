@@ -16,10 +16,14 @@ parser.add_argument('--host', type=Path, default=ROOT/'build/console-player/desk
 parser.add_argument('--repeats', type=int, default=3)
 parser.add_argument('--warmup', type=int, default=300)
 parser.add_argument('--frames', type=int, default=900)
+parser.add_argument('--input', type=Path, help='frame ranges and button masks; same format as shadPS4 benchmark')
 parser.add_argument('--mono-option', action='append', default=[], help='e.g. --mono-option=--optimize=all')
 args = parser.parse_args()
 if args.repeats < 1 or args.warmup < 300 or args.frames < 1:
     parser.error('positive repeats/frames and >=300 warmup frames required')
+if args.input:
+    args.input = args.input.resolve()
+    if not args.input.is_file(): parser.error('Missing input replay file')
 host = args.host.resolve()
 for path in [host/'main.exe', *args.roms]:
     if not path.is_file():
@@ -40,6 +44,7 @@ manifest = dict(kind='desktop Mono; no PS4 native runtime/GPU/audio queue',
     mono=subprocess.check_output(['mono','--version'], text=True),
     harness_sha256=sha(ROOT/'probes/consoles/Benchmark.cs'),
     mono_options=args.mono_option,
+    input_sha256=sha(args.input) if args.input else None,
     environment={k:v for k,v in os.environ.items() if k.startswith('EUTHERDRIVE_') or k in {'MONO_ENV_OPTIONS','MONO_THREADS_SUSPEND'}},
     cpu=next((l for l in Path('/proc/cpuinfo').read_text().splitlines() if l.startswith('model name')), ''),
     assemblies={p.name:sha(p) for p in sorted(host.iterdir()) if p.suffix in {'.dll','.exe'}},
@@ -53,7 +58,7 @@ for rom in args.roms:
         env = dict(os.environ, EUTHERDRIVE_RUNTIME_PROBE_HOST='1', ED_GB_CAPTURE=str(run_dir),
                    EUTHERDRIVE_TRACE_CONSOLE='0', MONO_PATH=str(host))
         load_before=os.getloadavg()
-        run = subprocess.run(['mono',*args.mono_option,str(exe),str(rom.resolve()),str(args.warmup),str(args.frames)],
+        run = subprocess.run(['mono',*args.mono_option,str(exe),str(rom.resolve()),str(args.warmup),str(args.frames),str(args.input) if args.input else '',str(run_dir/'benchmark-last.ppm')],
             env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=300)
         (run_dir/'run.log').write_text(run.stdout)
         lines = [l for l in run.stdout.splitlines() if l.startswith(('BENCH ', 'PROFILE '))]
@@ -63,7 +68,8 @@ for rom in args.roms:
         signature = re.search(r'video_hash=(\w+) audio_hash=(\w+) samples=(\d+) nonzero=(\d+)', lines[0]).groups()
         signatures.append(signature)
         manifest['runs'].append(dict(rom=str(rom.resolve()), rom_sha256=sha(rom), repeat=repeat+1,
-                                    load_average_before=load_before, results=lines))
+                                    load_average_before=load_before, frame_capture=str(run_dir/'benchmark-last.ppm'),
+                                    frame_capture_sha256=sha(run_dir/'benchmark-last.ppm'), results=lines))
         (out/'manifest.json').write_text(json.dumps(manifest,indent=2)+'\n')
     if len(set(signatures)) != 1:
         raise SystemExit(f'Non-deterministic output between repeats for {rom}; see {out}')

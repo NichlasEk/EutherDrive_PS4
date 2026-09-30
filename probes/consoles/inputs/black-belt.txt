@@ -1,0 +1,4 @@
+# Inclusive frame ranges; U=1 D=2 L=4 R=8 A=16 B=32 START=64 SELECT=128.
+# Wait for title screen, start, then move right during the measured interval.
+600 610 16
+1201 1500 8

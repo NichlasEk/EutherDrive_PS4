@@ -23,14 +23,21 @@ parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--sys-modules', type=Path, help='directory containing your dumped libSceLibcInternal.sprx')
 parser.add_argument('--timeout', type=int, default=25)
 parser.add_argument('--benchmark-rom', type=Path, help='benchmark the packaged managed player with a local ROM')
+parser.add_argument('--benchmark-warmup', type=int, default=300)
+parser.add_argument('--benchmark-input', type=Path, help='frame ranges and button masks for reproducible input')
 parser.add_argument('--benchmark-frames', type=int, default=300)
 parser.add_argument('--stress', action='store_true', help='also test concurrent GC and directory enumeration')
 parser.add_argument('--jit-preflight', action='store_true', help='test direct HLE JIT imports, aliasing and execution before Mono')
 args = parser.parse_args()
 if args.benchmark_rom:
     args.benchmark_rom = args.benchmark_rom.resolve()
-    if not args.benchmark_rom.is_file() or args.benchmark_frames < 1 or args.stress:
-        parser.error('benchmark needs an existing ROM, positive frame count, and no --stress')
+    if not args.benchmark_rom.is_file() or args.benchmark_frames < 1 or args.benchmark_warmup < 300 or args.stress:
+        parser.error('benchmark needs an existing ROM, >=300 warmup frames, positive frame count, and no --stress')
+
+if args.benchmark_input:
+    args.benchmark_input = args.benchmark_input.resolve()
+    if not args.benchmark_rom or not args.benchmark_input.is_file():
+        parser.error('benchmark input requires a ROM and an existing replay file')
 
 if not 1 <= args.timeout <= 300:
     parser.error('timeout must be 1..300 seconds')
@@ -197,8 +204,14 @@ if args.benchmark_rom:
     shutil.copy2(stage_source/'main.exe', stage/'main.exe')
     guest_rom = '/app0/benchmark' + args.benchmark_rom.suffix.lower()
     (stage/Path(guest_rom).name).symlink_to(args.benchmark_rom)
+    guest_input = ''
+    if args.benchmark_input:
+        shutil.copy2(args.benchmark_input, stage/'benchmark-input.txt')
+        guest_input = '/app0/benchmark-input.txt'
     benchmark_source = out/'Benchmark.cs'
-    benchmark_source.write_text(replace_once((ROOT/'probes/consoles/Benchmark.cs').read_text(),
+    benchmark_source_text = (ROOT/'probes/consoles/Benchmark.cs').read_text()
+    benchmark_harness_sha256 = hashlib.sha256(benchmark_source_text.encode()).hexdigest()
+    benchmark_source.write_text(replace_once(benchmark_source_text,
         '''static void Main(string[] args)''', '''public static void Run(string[] args)''')
         .replace('Bind<Action<string>>(emulator, "LoadRom")(args[0]);',
                  'Console.WriteLine("BENCHPROGRESS loading ROM"); Bind<Action<string>>(emulator, "LoadRom")(args[0]); Console.WriteLine("BENCHPROGRESS ROM loaded");')
@@ -207,7 +220,8 @@ if args.benchmark_rom:
         .replace('Console.WriteLine(', 'MonoBenchmark.Entry.Log('))
     wrapper_source = out/'BenchmarkEntry.cs'
     wrapper_source.write_text((ROOT/'probes/runtime/BenchmarkEntry.cs').read_text()
-        .replace('@ROM@', guest_rom).replace('@FRAMES@', str(args.benchmark_frames)))
+        .replace('@ROM@', guest_rom).replace('@FRAMES@', str(args.benchmark_frames))
+        .replace('@WARMUP@', str(args.benchmark_warmup)).replace('@INPUT@', guest_input))
     sdk = subprocess.check_output(['dotnet','--list-sdks'], text=True).splitlines()[-1]
     version, sdkroot = re.match(r'(\S+) \[(.+)\]', sdk).groups()
     refs = [Path('/usr/lib/mono/4.5-api')/n for n in ['mscorlib.dll','System.dll','System.Core.dll']]
@@ -281,7 +295,13 @@ benchmark_pass=bool(args.benchmark_rom and benchmark_log.exists()
                     and any('BENCH system=' in line for line in benchmark_lines))
 passed=(f'RESULT PASS EMULATOR MONO=managed PREFLIGHT={preflight} RIGHTS=unchanged' in native
         and (benchmark_pass if args.benchmark_rom else 'RESULT PASS\n' in managed))
-result=dict(kind='shadPS4 PS4 Mono CPU/audio/framebuffer benchmark; no timed GPU presentation' if args.benchmark_rom else 'managed runtime tests',
+frame_capture=profile/'shadPS4/data/eutherdrive-ps4/benchmark-last.ppm'
+result=dict(benchmark_warmup=args.benchmark_warmup,benchmark_frames=args.benchmark_frames,
+    input_sha256=sha(stage/'benchmark-input.txt') if args.benchmark_input else None,
+    harness_sha256=benchmark_harness_sha256 if args.benchmark_rom else None,
+    frame_capture_sha256=sha(frame_capture) if frame_capture.exists() else None,
+    frame_capture=str(frame_capture) if frame_capture.exists() else None,
+    kind='shadPS4 PS4 Mono CPU/audio/framebuffer benchmark; no timed GPU presentation' if args.benchmark_rom else 'managed runtime tests',
     benchmark_pass=passed if args.benchmark_rom else False,benchmark_results=benchmark_lines,
     rom_sha256=sha(args.benchmark_rom) if args.benchmark_rom else None,
     player_sha256=sha(stage/'main.exe') if args.benchmark_rom else None,
