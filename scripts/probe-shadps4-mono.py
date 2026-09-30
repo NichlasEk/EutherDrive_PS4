@@ -12,16 +12,26 @@ import os
 from pathlib import Path
 import re
 import shlex
+import signal
 import shutil
 import subprocess
 import time
+import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--sys-modules', type=Path, help='directory containing your dumped libSceLibcInternal.sprx')
 parser.add_argument('--timeout', type=int, default=25)
+parser.add_argument('--benchmark-rom', type=Path, help='benchmark the packaged managed player with a local ROM')
+parser.add_argument('--benchmark-frames', type=int, default=300)
+parser.add_argument('--stress', action='store_true', help='also test concurrent GC and directory enumeration')
 parser.add_argument('--jit-preflight', action='store_true', help='test direct HLE JIT imports, aliasing and execution before Mono')
 args = parser.parse_args()
+if args.benchmark_rom:
+    args.benchmark_rom = args.benchmark_rom.resolve()
+    if not args.benchmark_rom.is_file() or args.benchmark_frames < 1 or args.stress:
+        parser.error('benchmark needs an existing ROM, positive frame count, and no --stress')
+
 if not 1 <= args.timeout <= 300:
     parser.error('timeout must be 1..300 seconds')
 stage_source = (ROOT/'build/runtime-probe/current-pkgroot').resolve()
@@ -30,8 +40,9 @@ if not (stage_source/'main.exe').is_file():
 module = args.sys_modules.resolve()/'libSceLibcInternal.sprx' if args.sys_modules else None
 if module and not module.is_file():
     parser.error(f'Missing module: {module}')
-out = ROOT/'build/shadps4-mono'/time.strftime('%Y%m%d-%H%M%S')
-out.mkdir(parents=True, exist_ok=False)
+evidence_root = ROOT/'build/shadps4-mono'
+evidence_root.mkdir(parents=True, exist_ok=True)
+out = Path(tempfile.mkdtemp(prefix=time.strftime('%Y%m%d-%H%M%S-'), dir=evidence_root))
 sha = lambda p: hashlib.sha256(p.read_bytes()).hexdigest()
 
 def replace_once(text, old, new):
@@ -54,6 +65,8 @@ source = replace_once(source, '02 kernel found; loading Mono dependencies', '02 
 source = replace_once(source, '05 entering mono_jit_init; native JIT preflight passed',
                       '05 entering mono_jit_init; hardware JIT preflight SKIPPED')
 if args.jit_preflight:
+    source = replace_once(source, 'static int check_jit(void) {',
+        '#include "shadps4-preflight.h"\n\nstatic int check_jit(void) {')
     source = replace_once(source, 'int (*create)(int, size_t, int, int *);',
                           'int (*create)(const char *, size_t, int, int *);')
     source = replace_once(source,
@@ -85,9 +98,50 @@ if args.jit_preflight:
     source = replace_once(source,
         'report("EMULATOR ONLY: hardware preflight skipped; no credential changes");',
         'report("EMULATOR ONLY: direct HLE JIT preflight; no credential changes");\n'
-        '    if (!check_jit()) return;')
+        '    if (!check_mono_signals() || !check_jit()) return;')
+    source = replace_once(source, 'report("PASS native JIT returned 42");', r'''report("PASS native JIT returned 42");
+    ((unsigned char *)rw)[1] = 43;
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+    if (((int (*)(void))rx)() != 43) { report("FAIL JIT rewrite"); goto done; }
+    void *expected_tcb_thread;
+    __asm__ volatile ("movq %%fs:0x10,%0" : "=r" (expected_tcb_thread));
+    const unsigned char tls_code[] = {0x64,0x48,0x8b,0x04,0x25,0x10,0,0,0,0xc3};
+    memcpy(rw, tls_code, sizeof(tls_code));
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+    if (!expected_tcb_thread || ((void *(*)(void))rx)() != expected_tcb_thread) {
+        report("FAIL JIT TLS differs from ELF TLS"); goto done;
+    }
+    memcpy(rw, tls_code, sizeof(tls_code));
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+    if (((void *(*)(void))rx)() != expected_tcb_thread) {
+        report("FAIL JIT rewritten TLS"); goto done;
+    }
+    memcpy((char *)rw + 31, tls_code, sizeof(tls_code));
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+    // Enter the already executable page through another method first: a page
+    // fault at offset zero must also translate unaligned later method entries.
+    if (((void *(*)(void))rx)() != expected_tcb_thread ||
+        ((void *(*)(void))((char *)rx + 31))() != expected_tcb_thread) {
+        report("FAIL JIT unaligned secondary TLS entry"); goto done;
+    }
+    memcpy((char *)rw + 4160, tls_code, sizeof(tls_code));
+    memcpy((char *)rw + 4092, tls_code, sizeof(tls_code));
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+    if (((void *(*)(void))((char *)rx + 4160))() != expected_tcb_thread ||
+        ((void *(*)(void))((char *)rx + 4092))() != expected_tcb_thread) {
+        report("FAIL JIT cross-page TLS"); goto done;
+    }
+    report("PASS JIT rewrite, TLS, rewritten TLS and cross-page TLS");''')
     source = source.replace('PREFLIGHT=skipped', 'PREFLIGHT=JIT-verified')
     source = source.replace('hardware JIT preflight SKIPPED', 'emulator JIT alias/execution verified')
+if args.benchmark_rom:
+    source = replace_once(source, 'class_from_name(image, "Orbis", "Program")',
+                          'class_from_name(image, "MonoBenchmark", "Entry")')
+    source = replace_once(source, '"Orbis.Program::NativeReport"', '"MonoBenchmark.Entry::NativeReport"')
+    if source.count('"/app0/main.exe"') != 2:
+        raise RuntimeError('Review benchmark entry path transformation')
+    source = source.replace('"/app0/main.exe"', '"/app0/benchmark.exe"')
+    source = source.replace('06 loading main.exe', '06 loading benchmark.exe')
 (out/'host.c').write_text(source)
 build = (ROOT/'scripts/build-runtime-host.sh').read_text()
 build = replace_once(build, 'project_dir=$(CDPATH=\'\' cd -- "$(dirname -- "$0")/.." && pwd)',
@@ -139,10 +193,47 @@ for p in stage_source.iterdir():
 shutil.copy2(out/'eboot.bin',stage/'eboot.bin')
 reference=Path(subprocess.check_output([str(ROOT/'scripts/prepare-mono-reference.sh')],text=True).strip())
 bcl=reference/'mono/4.5'
-subprocess.run(['mcs','-sdk:4.5','-platform:x64','-optimize+', '-out:'+str(stage/'main.exe'),
-    *['-r:'+str(bcl/n) for n in ['System.Memory.dll','System.Runtime.dll',
-      'System.Runtime.CompilerServices.Unsafe.dll','System.Buffers.dll','System.Numerics.Vectors.dll']],
-    str(ROOT/'probes/runtime/Program.cs')],check=True)
+if args.benchmark_rom:
+    shutil.copy2(stage_source/'main.exe', stage/'main.exe')
+    guest_rom = '/app0/benchmark' + args.benchmark_rom.suffix.lower()
+    (stage/Path(guest_rom).name).symlink_to(args.benchmark_rom)
+    benchmark_source = out/'Benchmark.cs'
+    benchmark_source.write_text(replace_once((ROOT/'probes/consoles/Benchmark.cs').read_text(),
+        '''static void Main(string[] args)''', '''public static void Run(string[] args)''')
+        .replace('Bind<Action<string>>(emulator, "LoadRom")(args[0]);',
+                 'Console.WriteLine("BENCHPROGRESS loading ROM"); Bind<Action<string>>(emulator, "LoadRom")(args[0]); Console.WriteLine("BENCHPROGRESS ROM loaded");')
+        .replace('if (frame==warmup+1) {',
+                 'if (frame <= warmup && (frame == 1 || frame % 60 == 0)) Console.WriteLine("BENCHPROGRESS warmup frame=" + frame); if (frame==warmup+1) {')
+        .replace('Console.WriteLine(', 'MonoBenchmark.Entry.Log('))
+    wrapper_source = out/'BenchmarkEntry.cs'
+    wrapper_source.write_text((ROOT/'probes/runtime/BenchmarkEntry.cs').read_text()
+        .replace('@ROM@', guest_rom).replace('@FRAMES@', str(args.benchmark_frames)))
+    sdk = subprocess.check_output(['dotnet','--list-sdks'], text=True).splitlines()[-1]
+    version, sdkroot = re.match(r'(\S+) \[(.+)\]', sdk).groups()
+    refs = [Path('/usr/lib/mono/4.5-api')/n for n in ['mscorlib.dll','System.dll','System.Core.dll']]
+    refs += [ROOT/'build/console-player/desktop-host'/n for n in
+             ['main.exe','System.Memory.dll','System.Runtime.dll','System.Runtime.InteropServices.dll']]
+    # The reference and staged production player must be identical.
+    if sha(refs[3]) != sha(stage/'main.exe'):
+        raise RuntimeError('Desktop reference main.exe differs from the packaged player')
+    subprocess.run(['dotnet',str(Path(sdkroot)/version/'Roslyn/bincore/csc.dll'),
+        '-nologo','-nostdlib+','-langversion:latest','-optimize+','-target:exe',
+        '-out:'+str(stage/'benchmark.exe'), *['-r:'+str(p) for p in refs],
+        str(benchmark_source),str(wrapper_source)],check=True)
+else:
+    managed_source = ROOT/'probes/runtime/Program.cs'
+    if args.stress:
+        managed_source = out/'Program.cs'
+        managed_source.write_text(replace_once((ROOT/'probes/runtime/Program.cs').read_text().replace('exception.GetType().FullName + ": " + exception.Message', 'exception.ToString()'),
+            'Run("native-call", TestNativeCall);',
+            'Run("math-formatting", MonoEmulatorStress.MathAndFormatting);\n'
+            '            Run("gc-threads", MonoEmulatorStress.ConcurrentGc);\n'
+            '            Run("directory-io", MonoEmulatorStress.DirectoryIo);\n'
+            '            Run("native-call", TestNativeCall);'))
+    subprocess.run(['mcs','-sdk:4.5','-platform:x64','-optimize+', '-out:'+str(stage/'main.exe'),
+        *['-r:'+str(bcl/n) for n in ['System.Memory.dll','System.Runtime.dll',
+          'System.Runtime.CompilerServices.Unsafe.dll','System.Buffers.dll','System.Numerics.Vectors.dll']],
+        str(managed_source), *([str(ROOT/'probes/runtime/MonoEmulatorStress.cs')] if args.stress else [])],check=True)
 profile=out/'profile'
 modules=profile/'shadPS4/sys_modules'; modules.mkdir(parents=True)
 if module:
@@ -159,24 +250,52 @@ command=['timeout','--kill-after=3s',str(args.timeout)+'s','xvfb-run','-a',str(e
 # No core dumps from an expected unsupported-runtime crash.
 import resource
 resource.setrlimit(resource.RLIMIT_CORE,(0,0))
+guest=profile/'shadPS4/data/eutherdrive-ps4/native-probe.log'
+stopped_after_result = False
 with (out/'emulator.log').open('w') as log:
-    run=subprocess.run(command,env=env,stdout=log,stderr=subprocess.STDOUT)
+    run=subprocess.Popen(command,env=env,stdout=log,stderr=subprocess.STDOUT,start_new_session=True)
+    while run.poll() is None:
+        report_text = guest.read_text(errors='replace') if guest.exists() else ''
+        if 'RESULT PASS EMULATOR MONO=' in report_text or 'RESULT FAIL EMULATOR MONO' in report_text:
+            # Mono cleanup has returned before these final host markers. Stop
+            # only this probe's process group instead of idling on its photo UI.
+            stopped_after_result = True
+            try: os.killpg(run.pid, signal.SIGTERM)
+            except ProcessLookupError: pass
+            try: run.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                os.killpg(run.pid, signal.SIGKILL)
+                run.wait()
+            break
+        time.sleep(0.2)
 log=(out/'emulator.log').read_text(errors='replace')
 guest=profile/'shadPS4/data/eutherdrive-ps4/native-probe.log'
 native=guest.read_text(errors='replace') if guest.exists() else ''
 managed_log=profile/'shadPS4/data/eutherdrive-ps4/runtime-probe.log'
 managed=managed_log.read_text(errors='replace') if managed_log.exists() else ''
 preflight='JIT-verified' if args.jit_preflight else 'skipped'
+benchmark_log=profile/'shadPS4/data/eutherdrive-ps4/benchmark-result.log'
+benchmark_lines=[line for line in native.splitlines() if line.startswith(('BENCH system=', 'PROFILE '))]
+benchmark_pass=bool(args.benchmark_rom and benchmark_log.exists()
+                    and benchmark_log.read_text() == 'RESULT PASS\n'
+                    and any('BENCH system=' in line for line in benchmark_lines))
 passed=(f'RESULT PASS EMULATOR MONO=managed PREFLIGHT={preflight} RIGHTS=unchanged' in native
-        and 'RESULT PASS\n' in managed)
-result=dict(emulator_exit=run.returncode,managed_pass=passed,
+        and (benchmark_pass if args.benchmark_rom else 'RESULT PASS\n' in managed))
+result=dict(kind='shadPS4 PS4 Mono CPU/audio/framebuffer benchmark; no timed GPU presentation' if args.benchmark_rom else 'managed runtime tests',
+    benchmark_pass=passed if args.benchmark_rom else False,benchmark_results=benchmark_lines,
+    rom_sha256=sha(args.benchmark_rom) if args.benchmark_rom else None,
+    player_sha256=sha(stage/'main.exe') if args.benchmark_rom else None,
+    stopped_after_result=stopped_after_result,stress_requested=args.stress,emulator_exit=run.returncode,managed_pass=passed and not bool(args.benchmark_rom),
     jit_preflight_requested=args.jit_preflight,
     jit_execution_pass='PASS native JIT returned 42' in native,
+    signal_pass='PASS signals: query, mask, delivery, guest arguments, restore' in native,
+    jit_tls_pass='PASS JIT rewrite, TLS, rewritten TLS and cross-page TLS' in native,
+    guard_heap=env.get('SHADPS4_MONO_GUARD_HEAP','0'),
     experimental_mono=env.get('SHADPS4_EXPERIMENTAL_MONO','0'),
     first_gpu_frame='VULKAN ready: first GPU frame and flip completed' in native,
     module=str(module) if module else None,module_sha256=sha(module) if module else None,
     emulator_sha256=sha(emulator),mono_sha256=sha(stage/'sce_module/libmonosgen-2.0.prx'),
-    diagnostic_main_sha256=sha(stage/'main.exe'),
+    diagnostic_main_sha256=sha(stage/('benchmark.exe' if args.benchmark_rom else 'main.exe')),
     called_stubs=sorted(set(re.findall(r'Stub: (\S+) \(nid:',log))),
     unresolved=sorted(set(re.findall(r'Stub resolved \S+ as (\S+) \(lib: ([^,]+), mod: ([^)]+)\)',log))),
     checkpoints=[l for l in native.splitlines() if l.startswith(('0','FAIL','RESULT','EMULATOR','DIAGNOSTIC','LOAD'))])

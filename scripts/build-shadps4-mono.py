@@ -34,11 +34,12 @@ git('submodule','update','--init','--depth','1','--jobs',str(args.jobs),'--',*pa
 for path in ['externals/zydis','externals/sirit','externals/freetype']:
     subprocess.run(['git','-C',str(source/path),'submodule','update','--init','--depth','1'],check=True)
 build.mkdir(parents=True,exist_ok=True)
-test=build/'test-mono-mspace'
-subprocess.run(['clang++','-std=c++20','-g','-O1','-Wall','-Wextra','-Werror',
-    '-fsanitize=address,undefined','-pthread','-I'+str(source/'src'),
-    str(source/'src/tests/mono_mspace.cpp'),'-o',str(test)],check=True)
-subprocess.run([str(test)],check=True)
+for name in ['mono_mspace', 'mono_printf', 'mono_safe_string']:
+    test=build/('test-'+name.replace('_','-'))
+    subprocess.run(['clang++','-std=c++20','-g','-O1','-Wall','-Wextra','-Werror',
+        '-Wno-unused-function','-fsanitize=address,undefined','-pthread','-I'+str(source/'src'),
+        str(source/'src/tests'/f'{name}.cpp'),'-o',str(test)],check=True)
+    subprocess.run([str(test)],check=True)
 subprocess.run(['cmake','-S',str(source),'-B',str(build),'-G','Ninja',
     '-DCMAKE_C_COMPILER=clang','-DCMAKE_CXX_COMPILER=clang++','-DCMAKE_BUILD_TYPE=Release',
     '-DENABLE_DISCORD_RPC=OFF','-DENABLE_UPDATER=OFF'],check=True)

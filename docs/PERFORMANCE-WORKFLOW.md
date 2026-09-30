@@ -160,10 +160,36 @@ to separate runtime/JIT cost from CPU and presentation costs.
 
 ### Experimental emulator development (2026-09-30)
 
-The initial missing-mspace/JIT blockers now have opt-in implementations in
-our pinned shadPS4 patch. See `patches/shadps4-mono/README.md` for build,
-probe commands and evidence. Native shared-alias execution returns 42 after
-descriptor closure; Mono also successfully allocates/maps its own JIT memory.
-Managed startup still fails during libc-dependent initialization. No managed
-ROM FPS in shadPS4 has been obtained. Next is ABI-correct diagnostic formatting
-and the remaining runtime calls, before gameplay or performance comparisons.
+The pinned opt-in shadPS4 patch now runs PS4 Mono managed tests and the
+unchanged player assembly in the ROM benchmark. See
+`patches/shadps4-mono/README.md` for implementation limits and build instructions.
+
+```sh
+SHADPS4="$PWD/build/shadps4-dev/shadps4" SHADPS4_EXPERIMENTAL_MONO=1 \
+  python3 scripts/probe-shadps4-mono.py --jit-preflight --stress --timeout 45
+SHADPS4="$PWD/build/shadps4-dev/shadps4" SHADPS4_EXPERIMENTAL_MONO=1 \
+  python3 scripts/probe-shadps4-mono.py --jit-preflight \
+    --benchmark-rom build/console-player/rom01/game.sms --benchmark-frames 300 --timeout 90
+python3 scripts/benchmark-console-player.py build/console-player/rom01/game.sms \
+  --repeats 2 --frames 300
+```
+
+The benchmark uses 300 warmup frames, the existing scripted input and complete
+pixel/sample hashing. Generated diagnostics report through the native callback;
+`Console.WriteLine` alone did not deliver results in this PS4 runtime. The harness
+has its own managed entry class, leaving the production assembly unchanged.
+A result requires the benchmark marker, BENCH data and the native host's final
+PASS after Mono cleanup. The tool then stops only its isolated process group;
+`stopped_after_result` distinguishes this from timeout or an unsupported crash.
+
+First completed Alex Kidd run: `build/shadps4-mono/20260930-122750/`, 95.99
+pipeline FPS / 94.43 wall FPS, core 8.295 ms, audio 1.615 ms, copy 0.507 ms.
+The desktop runs in `build/benchmarks/20260930-122923/` produced 100.82 and
+104.52 pipeline FPS. All three have video hash `09cda47b`, audio hash `7f917301`,
+441000 samples and 379964 nonzero samples. These timings exclude GPU/audio-queue
+presentation and use the host CPU; they do not reproduce the physical PS4's
+19 FPS or establish that Mono is the sole hardware bottleneck.
+
+Repeat `20260930-122952` gave 97.19 pipeline / 95.60 wall FPS with the same
+hashes and counts. Final twelve-test runtime run:
+`build/shadps4-mono/20260930-123135-sjlqtyvk/` (PASS).

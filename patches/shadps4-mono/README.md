@@ -49,26 +49,80 @@ machine code returning 42. SDK import definitions are generated into an
 isolated SDK overlay for the linker and SELF converter; they are not deployed
 as a guest library. The production hardware preflight is unchanged.
 
-Verified 2026-09-30, evidence `build/shadps4-mono/20260930-112406/`:
-- Native GPU frame and JIT return-42 test PASS.
-- Mono PRX loads; its real JIT create/alias/map calls succeed (256 KiB RWX).
-- Managed test does NOT pass; runtime initialization still aborts. Actual
-  called stubs: access, getenv, getrlimit, set_constraint_handler_s,
-  vsnprintf, fprintf and abort. Missing formatting also hides the abort
-  diagnostic, so the root cause is not established yet.
-- Same binary with the experiment disabled previously stopped earlier in
-  mspace creation (`20260930-111329`); enabling mspace alone advanced to the
-  missing JIT operations (`20260930-111342`).
+Managed runtime bring-up (2026-09-30)
+-----------------------------------
 
-Next: implement/test PS4 libc varargs formatting and diagnostic output with
-ABI-correct guest argument handling, then inspect the actual Mono error.
-Do not simply forward guest va_list or FILE pointers into host libc.
-A user-owned libc dump remains an optional alternate diagnostic route.
-Threading, GC, managed/native calls and ROM gameplay remain unverified.
-Emulator timings will not establish the physical PS4's Jaguar CPU throughput.
+The original initialization failure is fixed without a firmware dump. Actual
+blockers included guest varargs formatting, signal numbering/query semantics,
+Dinkumware character tables, a `strncpy_s` buffer overwrite, missing memory
+operations, and dynamically generated TLS reads using host FS instead of guest
+GS. The JIT monitor invalidates executable aliases on writes and translates the
+observed Mono TCB-load instructions before execution, including rewritten code,
+unaligned secondary entries and cross-page instructions. This is experimental
+recognition of a narrow instruction shape, not a general arbitrary-JIT translator.
 
-Final build-script rerun also passed (including sanitizer tests); repeated
-probe `build/shadps4-mono/20260930-112548/result.json` reproduced JIT PASS
-and managed FAIL. Final emulator SHA-256:
-`e66e12230a948054860179585f5a0ef196d08ec182de86b989915abce8ef7d9e`.
-The patch was checked against a fresh index at the pinned upstream revision.
+The virtual `libkernel` module exposes only registered emulator symbols; it is
+not a fabricated firmware dump. Native calls now resolve through this module.
+Directory functions use the guest VFS. That VFS has no guest symlink nodes;
+`lstat` shares `stat` semantics, including errors, without exposing host mount
+symlinks. Unknown sysctl queries return an error rather than fake success.
+
+Linux thread suspension uses a reserved host signal, a real stopped register
+context and a futex handshake. It supplies the observed Mono suspend/get-context/
+resume path for GC. The handler does not allocate, log or take a mutex. General
+context replacement and arbitrary concurrent suspend callers are not supported.
+
+Evidence `build/shadps4-mono/20260930-121911/`: all eleven C# tests passed,
+including concurrent GC with two allocating workers, directory enumeration,
+threads, exceptions, Span, native calls and file IO; Mono cleanup returned.
+Native signal delivery/masks/query/restore and shared-JIT/TLS tests also passed.
+Earlier basic C# tests passed with and without guarded heap allocation
+(`20260930-115953`, `20260930-120041`).
+
+```sh
+SHADPS4="$PWD/build/shadps4-dev/shadps4" SHADPS4_EXPERIMENTAL_MONO=1 \
+  python3 scripts/probe-shadps4-mono.py --jit-preflight --stress --timeout 45
+# Optional heap diagnostics; do not use for throughput measurements:
+SHADPS4="$PWD/build/shadps4-dev/shadps4" SHADPS4_EXPERIMENTAL_MONO=1 \
+SHADPS4_MONO_GUARD_HEAP=1 \
+  python3 scripts/probe-shadps4-mono.py --jit-preflight --stress --timeout 45
+```
+
+Guarded allocations have inaccessible pages at both ends and retain freed
+mappings as inaccessible until pool destruction. Alignment leaves up to 15 bytes
+of padding before the upper guard; this is not full guest AddressSanitizer.
+Standalone allocator, formatting and bounded-string tests run with ASan/UBSan.
+
+`--benchmark-rom PATH --benchmark-frames 300` runs the unchanged packaged
+player assembly and PS4 Mono against a local ROM, with 300 warmup frames. It
+measures core/audio/framebuffer work and hashes generated samples/pixels; GPU
+presentation and the native audio queue are not timed. ROM data stays local.
+This executes on the host CPU and cannot predict Jaguar throughput on PS4.
+
+Remaining compatibility limits include unsupported libc/kernel calls, partial
+signal contexts, JIT protection/concurrency corner cases and self-modifying code
+executing from its own writable page. Passing the tested runtime slice does not
+establish support for arbitrary C# applications or full emulator gameplay.
+The production PS4 package, credential preflight and USB are unchanged.
+
+Final validation (2026-09-30)
+---------------------------
+
+- `20260930-123135-sjlqtyvk`: all twelve managed tests PASS with the final
+  emulator, including floating remainder/formatting, concurrent GC, directories,
+  native calls and cleanup. Native signal/JIT/TLS preflight PASS.
+- `20260930-122458`: twelve tests also PASS with guarded heap allocation.
+- `20260930-122750` / `20260930-122952`: actual PS4 Mono + unchanged player,
+  Alex Kidd, 300 warmup + 300 measured frames: 95.99 / 97.19 pipeline FPS.
+  Second run: wall 95.60 FPS, core 8.192 ms, audio 1.597 ms, copy 0.501 ms.
+- Desktop comparison `build/benchmarks/20260930-122923`: 100.82 / 104.52 FPS.
+  All four runs use identical ROM/player hashes and produce video `09cda47b`,
+  audio `7f917301`, 441000 samples, 379964 nonzero samples.
+- `20260930-123113`: the same emulator with the experiment disabled still
+  fails at the unsupported Mono startup path; no false managed PASS.
+- Build script, ASan/UBSan unit tests and subsequent incremental build passed.
+  Patch application was checked using a fresh index at the pinned upstream HEAD.
+
+Final emulator SHA-256:
+`d0c25f626a62d8fdc1f6fe759304c6d2b455fe6bea63c431ba0c1493b2a1b8af`.
+The source patch is the durable artifact; binaries, logs and ROMs stay ignored.

@@ -13,6 +13,100 @@ index d05b00ed..265267a8 100644
      std::atomic_bool is_opened{};
      std::atomic<FileType> type{FileType::Regular};
      std::filesystem::path m_host_name;
+diff --git a/src/core/libraries/kernel/file_system.cpp b/src/core/libraries/kernel/file_system.cpp
+index 540d0308..b9ba0287 100644
+--- a/src/core/libraries/kernel/file_system.cpp
++++ b/src/core/libraries/kernel/file_system.cpp
+@@ -1567,6 +1567,13 @@ s32 PS4_SYSV_ABI posix_select(s32 nfds, fd_set* readfds, fd_set* writefds, fd_se
+ #endif
+ 
+ void RegisterFileSystem(Core::Loader::SymbolsResolver* sym) {
++    if (const char* enabled = std::getenv("SHADPS4_EXPERIMENTAL_MONO"); enabled && std::strcmp(enabled, "1") == 0) {
++        LIB_FUNCTION("8vE6Z6VEYyk", "libkernel", 1, "libkernel", posix_access);
++        // This VFS exposes no guest symlink nodes: host symlinks belong to mount
++        // implementation. lstat therefore has the same guest semantics as stat.
++        LIB_FUNCTION("DRGXpDDh8Ng", "libkernel", 1, "libkernel", posix_stat);
++    }
++
+     LIB_FUNCTION("6c3rCVE-fTU", "libkernel", 1, "libkernel", open);
+     LIB_FUNCTION("wuCroIGjt2g", "libScePosix", 1, "libkernel", posix_open);
+     LIB_FUNCTION("wuCroIGjt2g", "libkernel", 1, "libkernel", posix_open);
+diff --git a/src/core/libraries/kernel/file_system.h b/src/core/libraries/kernel/file_system.h
+index d8989828..ee401ea7 100644
+--- a/src/core/libraries/kernel/file_system.h
++++ b/src/core/libraries/kernel/file_system.h
+@@ -72,6 +72,7 @@ s64 PS4_SYSV_ABI sceKernelWrite(s32 fd, const void* buf, u64 nbytes);
+ s64 PS4_SYSV_ABI sceKernelRead(s32 fd, void* buf, u64 nbytes);
+ s64 PS4_SYSV_ABI sceKernelPread(s32 fd, void* buf, u64 nbytes, s64 offset);
+ s64 PS4_SYSV_ABI sceKernelPwrite(s32 fd, void* buf, u64 nbytes, s64 offset);
++s64 PS4_SYSV_ABI posix_getdents(s32 fd, char* buf, u64 nbytes);
+ void RegisterFileSystem(Core::Loader::SymbolsResolver* sym);
+ 
+ } // namespace Libraries::Kernel
+diff --git a/src/core/libraries/kernel/kernel.cpp b/src/core/libraries/kernel/kernel.cpp
+index 4c08856c..fcf657fb 100644
+--- a/src/core/libraries/kernel/kernel.cpp
++++ b/src/core/libraries/kernel/kernel.cpp
+@@ -2,6 +2,9 @@
+ // SPDX-License-Identifier: GPL-2.0-or-later
+ 
+ #include <thread>
++#ifdef __linux__
++#include <sys/resource.h>
++#endif
+ #include <boost/asio/io_context.hpp>
+ 
+ #include "common/assert.h"
+@@ -437,7 +440,49 @@ u64 PS4_SYSV_ABI posix_sysconf(s32 name) {
+     }
+ }
+ 
++
++#ifdef __linux__
++struct MonoRlimit { u64 current; u64 maximum; };
++static s32 PS4_SYSV_ABI mono_getrlimit(s32 resource, MonoRlimit* output) {
++    if (!output) { *__Error() = POSIX_EFAULT; return -1; }
++    int native;
++    switch (resource) {
++    case 0: native = RLIMIT_CPU; break;
++    case 1: native = RLIMIT_FSIZE; break;
++    case 2: native = RLIMIT_DATA; break;
++    case 3: native = RLIMIT_STACK; break;
++    case 4: native = RLIMIT_CORE; break;
++    case 5: native = RLIMIT_RSS; break;
++    case 6: native = RLIMIT_MEMLOCK; break;
++    case 7: native = RLIMIT_NPROC; break;
++    case 8: native = RLIMIT_NOFILE; break;
++    case 10: native = RLIMIT_AS; break;
++    default: *__Error() = POSIX_EINVAL; return -1;
++    }
++    struct rlimit limit{};
++    if (::getrlimit(native, &limit) != 0) { SetPosixErrno(errno); return -1; }
++    output->current = std::min<u64>(limit.rlim_cur, INT64_MAX);
++    output->maximum = std::min<u64>(limit.rlim_max, INT64_MAX);
++    return 0;
++}
++static s32 PS4_SYSV_ABI mono_sysctl(const s32* name, u32 count, void* output, size_t* length,
++                                  const void* input, size_t input_length) {
++    LOG_INFO(Lib_Kernel, "Mono sysctl count={} key={},{}", count,
++             name && count ? name[0] : -1, name && count > 1 ? name[1] : -1);
++    // Unknown MIBs must fail, never claim success with uninitialized output.
++    *__Error() = POSIX_ENOENT;
++    return -1;
++}
++#endif
++
+ void RegisterLib(Core::Loader::SymbolsResolver* sym) {
++#ifdef __linux__
++    if (const char* enabled = std::getenv("SHADPS4_EXPERIMENTAL_MONO"); enabled && std::strcmp(enabled, "1") == 0) {
++        LIB_FUNCTION("Wh7HbV7JFqc", "libkernel", 1, "libkernel", mono_getrlimit);
++        LIB_FUNCTION("DFmMT80xcNI", "libkernel", 1, "libkernel", mono_sysctl);
++    }
++#endif
++
+     service_thread = std::jthread{KernelServiceThread};
+ 
+     static char const** kernel_environ = g_environment;
 diff --git a/src/core/libraries/kernel/memory.cpp b/src/core/libraries/kernel/memory.cpp
 index ef4d39cc..9d7423ce 100644
 --- a/src/core/libraries/kernel/memory.cpp
@@ -141,11 +235,742 @@ index 00000000..6e216993
 +}
 +} // namespace Libraries::Kernel
 +#endif
+diff --git a/src/core/libraries/kernel/process.cpp b/src/core/libraries/kernel/process.cpp
+index e72bd7b5..c7cf98e4 100644
+--- a/src/core/libraries/kernel/process.cpp
++++ b/src/core/libraries/kernel/process.cpp
+@@ -2,6 +2,8 @@
+ // SPDX-License-Identifier: GPL-2.0-or-later
+ 
+ #include "common/elf_info.h"
++#include "common/string_util.h"
++#include "core/aerolib/aerolib.h"
+ #include "common/logging/log.h"
+ #include "core/emulator_settings.h"
+ #include "core/file_sys/fs.h"
+@@ -11,6 +13,14 @@
+ #include "core/linker.h"
+ 
+ namespace Libraries::Kernel {
++// A discoverable handle for the emulator's existing kernel HLE exports.
++// No guest code/data segments or firmware are fabricated for this module.
++static constexpr s32 MonoKernelHandle = 0x7fff0001;
++static bool MonoKernelEnabled() {
++    const auto* enabled = std::getenv("SHADPS4_EXPERIMENTAL_MONO");
++    return enabled && std::strcmp(enabled, "1") == 0;
++}
++
+ 
+ s32 PS4_SYSV_ABI sceKernelIsInSandbox() {
+     return 1;
+@@ -116,6 +126,22 @@ s32 PS4_SYSV_ABI sceKernelLoadStartModule(const char* moduleFileName, u64 args,
+ }
+ 
+ s32 PS4_SYSV_ABI sceKernelDlsym(s32 handle, const char* symbol, void** addrp) {
++    if (!symbol || !addrp) return ORBIS_KERNEL_ERROR_EFAULT;
++    if (MonoKernelEnabled() && handle == MonoKernelHandle) {
++        *addrp = nullptr;
++        auto* linker = Common::Singleton<Core::Linker>::Instance();
++        for (const auto& entry : linker->GetHLESymbols().GetSymbols()) {
++            const auto fields = Common::SplitString(entry.name, '#');
++            if (fields.size() != 5 || fields[1] != "libkernel" || fields[3] != "libkernel") continue;
++            const auto* nid = Core::AeroLib::FindByNid(fields[0].c_str());
++            if (nid && std::strcmp(nid->name, symbol) == 0) {
++                *addrp = reinterpret_cast<void*>(entry.virtual_address);
++                return ORBIS_OK;
++            }
++        }
++        return ORBIS_KERNEL_ERROR_ESRCH;
++    }
++
+     auto* linker = Common::Singleton<Core::Linker>::Instance();
+     auto* module = linker->GetModule(handle);
+     if (module == nullptr) {
+@@ -190,6 +216,12 @@ s32 PS4_SYSV_ABI sceKernelGetModuleInfo(s32 handle, Core::OrbisKernelModuleInfo*
+         return ORBIS_KERNEL_ERROR_EINVAL;
+     }
+ 
++    if (MonoKernelEnabled() && handle == MonoKernelHandle) {
++        *info = {};
++        std::strcpy(info->name.data(), "libkernel");
++        return ORBIS_OK;
++    }
++
+     auto* linker = Common::Singleton<Core::Linker>::Instance();
+     auto* module = linker->GetModule(handle);
+     if (module == nullptr) {
+@@ -207,6 +239,12 @@ s32 PS4_SYSV_ABI sceKernelGetModuleInfo2(s32 handle, Core::OrbisKernelModuleInfo
+         return ORBIS_KERNEL_ERROR_EINVAL;
+     }
+ 
++    if (MonoKernelEnabled() && handle == MonoKernelHandle) {
++        *info = {};
++        std::strcpy(info->name.data(), "libkernel");
++        return ORBIS_OK;
++    }
++
+     auto* linker = Common::Singleton<Core::Linker>::Instance();
+     auto* module = linker->GetModule(handle);
+     if (module == nullptr) {
+@@ -254,6 +292,10 @@ s32 PS4_SYSV_ABI sceKernelGetModuleList(s32* handles, u64 num_array, u64* out_co
+         return ORBIS_KERNEL_ERROR_ENOMEM;
+     }
+ 
++    if (MonoKernelEnabled()) {
++        if (count == num_array) return ORBIS_KERNEL_ERROR_ENOMEM;
++        handles[count++] = MonoKernelHandle;
++    }
+     *out_count = count;
+     return ORBIS_OK;
+ }
+diff --git a/src/core/libraries/kernel/threads/exception.cpp b/src/core/libraries/kernel/threads/exception.cpp
+index ee04a48f..42744ee3 100644
+--- a/src/core/libraries/kernel/threads/exception.cpp
++++ b/src/core/libraries/kernel/threads/exception.cpp
+@@ -17,8 +17,18 @@
+ #include <csignal>
+ #endif
+ #include <unordered_set>
++#include "core/libraries/kernel/threads/mono_suspend.h"
+ 
+ namespace Libraries::Kernel {
++#ifdef __linux__
++static const bool mono_signals = [] {
++    const auto* enabled = std::getenv("SHADPS4_EXPERIMENTAL_MONO");
++    return enabled && std::strcmp(enabled, "1") == 0;
++}();
++#else
++static constexpr bool mono_signals = false;
++#endif
++
+ 
+ #ifdef _WIN32
+ 
+@@ -34,6 +44,9 @@ s32 OrbisToNativeSignal(s32 s) {
+ #else
+ 
+ s32 NativeToOrbisSignal(s32 s) {
++#ifdef __linux__
++    if (mono_signals && s >= SIGRTMIN && s < SIGRTMAX - 1) return 65 + s - SIGRTMIN;
++#endif
+     switch (s) {
+     case SIGHUP:
+         return POSIX_SIGHUP;
+@@ -108,6 +121,13 @@ s32 NativeToOrbisSignal(s32 s) {
+ }
+ 
+ s32 OrbisToNativeSignal(s32 s) {
++#ifdef __linux__
++    if (mono_signals && s >= 34 && s < 65) return -1;
++    if (mono_signals && s >= 65 && s < 128) {
++        const int native = SIGRTMIN + s - 65;
++        return native < SIGRTMAX - 1 ? native : -1;
++    }
++#endif
+     switch (s) {
+     case POSIX_SIGHUP:
+         return SIGHUP;
+@@ -189,6 +209,7 @@ s32 OrbisToNativeSignal(s32 s) {
+ 
+ std::array<OrbisKernelExceptionHandler, 130> Handlers{};
+ Sigset g_sigintr{};
++static std::array<Sigaction, 130> mono_actions{};
+ 
+ #ifndef _WIN64
+ void SigactionHandler(int native_signum, siginfo_t* inf, ucontext_t* raw_context) {
+@@ -261,12 +282,50 @@ void SigactionHandler(int native_signum, siginfo_t* inf, ucontext_t* raw_context
+         ctx.uc_mcontext.mc_fs = (regs[REG_CSGSFS] >> 32) & 0xFFFF;
+         ctx.uc_mcontext.mc_gs = (regs[REG_CSGSFS] >> 16) & 0xFFFF;
+         ctx.uc_mcontext.mc_rip = (regs[REG_RIP]);
++        ctx.uc_mcontext.mc_rflags = regs[REG_EFL];
++        ctx.uc_mcontext.mc_len = sizeof(Mcontext);
+         ctx.uc_mcontext.mc_addr = reinterpret_cast<uint64_t>(inf->si_addr);
+ #endif
+ #else
+         UNREACHABLE_MSG("SigactionHandler not implemented for current architecture.");
+ #endif
+-        handler(NativeToOrbisSignal(native_signum), &ctx);
++        const int guest_sig = NativeToOrbisSignal(native_signum);
++        if (mono_signals && (native_signum == SIGSEGV || native_signum == SIGBUS)) {
++            LOG_ERROR(Lib_Kernel, "Mono guest fault: pc={:#x} address={:#x}", ctx.uc_mcontext.mc_rip, ctx.uc_mcontext.mc_addr);
++        }
++        if (mono_signals && (mono_actions[guest_sig].sa_flags & 0x40)) {
++            Siginfo guest_info{};
++            guest_info._si_signo = guest_sig;
++            guest_info._si_errno = inf->si_errno;
++            guest_info._si_code = inf->si_code;
++            guest_info._si_addr = inf->si_addr;
++            mono_actions[guest_sig].__sigaction_handler.sigaction(guest_sig, &guest_info, &ctx);
++#if defined(__linux__) && defined(ARCH_X86_64)
++            // Managed exception handlers may redirect execution into a throw
++            // trampoline. Returning without copying this state repeats the fault.
++            auto& native = raw_context->uc_mcontext.gregs;
++            native[REG_R8] = ctx.uc_mcontext.mc_r8;
++            native[REG_R9] = ctx.uc_mcontext.mc_r9;
++            native[REG_R10] = ctx.uc_mcontext.mc_r10;
++            native[REG_R11] = ctx.uc_mcontext.mc_r11;
++            native[REG_R12] = ctx.uc_mcontext.mc_r12;
++            native[REG_R13] = ctx.uc_mcontext.mc_r13;
++            native[REG_R14] = ctx.uc_mcontext.mc_r14;
++            native[REG_R15] = ctx.uc_mcontext.mc_r15;
++            native[REG_RDI] = ctx.uc_mcontext.mc_rdi;
++            native[REG_RSI] = ctx.uc_mcontext.mc_rsi;
++            native[REG_RBP] = ctx.uc_mcontext.mc_rbp;
++            native[REG_RBX] = ctx.uc_mcontext.mc_rbx;
++            native[REG_RDX] = ctx.uc_mcontext.mc_rdx;
++            native[REG_RAX] = ctx.uc_mcontext.mc_rax;
++            native[REG_RCX] = ctx.uc_mcontext.mc_rcx;
++            native[REG_RSP] = ctx.uc_mcontext.mc_rsp;
++            native[REG_RIP] = ctx.uc_mcontext.mc_rip;
++#endif
++
++        } else {
++            handler(guest_sig, &ctx);
++        }
+     } else {
+         UNREACHABLE_MSG("Unhandled exception");
+     }
+@@ -379,7 +438,13 @@ static void NativeSigsetToGuest(const sigset_t& native, Sigset& guest) {
+ }
+ #endif
+ 
++s32 PS4_SYSV_ABI posix_pthread_sigmask(s32 how, const Sigset* set, Sigset* oset);
+ s32 PS4_SYSV_ABI posix_sigprocmask(s32 how, const Sigset* set, Sigset* oset) {
++    if (mono_signals) {
++        const auto result = posix_pthread_sigmask(how, set, oset);
++        if (result) { *__Error() = result; return ORBIS_FAIL; }
++        return ORBIS_OK;
++    }
+     LOG_ERROR(Lib_Kernel, "(STUBBED) called, how = {}", how);
+     return ORBIS_OK;
+ }
+@@ -446,7 +511,7 @@ s32 PS4_SYSV_ABI posix_sigaction(s32 sig, Sigaction* act, Sigaction* oact) {
+     }
+ #ifdef _WIN32
+     LOG_ERROR(Lib_Kernel, "(STUBBED) called, sig: {}", sig);
+-    Handlers[sig] = reinterpret_cast<OrbisKernelExceptionHandler>(
++    if (act || !mono_signals) Handlers[sig] = reinterpret_cast<OrbisKernelExceptionHandler>(
+         act ? act->__sigaction_handler.sigaction : nullptr);
+     if (oact) {
+         memset(oact, 0, sizeof(*oact));
+@@ -477,20 +542,35 @@ s32 PS4_SYSV_ABI posix_sigaction(s32 sig, Sigaction* act, Sigaction* oact) {
+                   sig);
+     }
+ #endif
+-    LOG_INFO(Lib_Kernel, "called, sig: {}, native sig: {}", sig, native_sig);
++    LOG_INFO(Lib_Kernel, "called, sig: {}, native sig: {}, flags: {:#x}", sig, native_sig, act ? act->sa_flags : 0);
+     struct sigaction native_act{};
+     if (act) {
+         native_act.sa_flags = act->sa_flags;
++        if (mono_signals && (act->sa_flags & 0x7f)) {
++            native_act.sa_flags = SA_SIGINFO;
++            if (act->sa_flags & 1) native_act.sa_flags |= SA_ONSTACK;
++            if (act->sa_flags & 2) native_act.sa_flags |= SA_RESTART;
++            if (act->sa_flags & 4) native_act.sa_flags |= SA_RESETHAND;
++            if (act->sa_flags & 8) native_act.sa_flags |= SA_NOCLDSTOP;
++            if (act->sa_flags & 16) native_act.sa_flags |= SA_NODEFER;
++            if (act->sa_flags & 32) native_act.sa_flags |= SA_NOCLDWAIT;
++        }
++        if (mono_signals) native_act.sa_flags |= SA_SIGINFO;
+         native_act.sa_sigaction =
+             reinterpret_cast<decltype(native_act.sa_sigaction)>(SigactionHandler);
+         GuestSigsetToNative(act->sa_mask, native_act.sa_mask);
++        if (mono_signals && reinterpret_cast<uintptr_t>(act->__sigaction_handler.handler) <= 1) {
++            native_act.sa_handler = reinterpret_cast<uintptr_t>(act->__sigaction_handler.handler) == 1 ? SIG_IGN : SIG_DFL;
++        }
+     }
+ 
+     const auto prev_handler = Handlers[sig];
++    const auto old_mono_action = mono_actions[sig];
+ 
+     if (native_sig == SIGSEGV || native_sig == SIGBUS || native_sig == SIGILL) {
+-        Handlers[sig] = reinterpret_cast<OrbisKernelExceptionHandler>(
++        if (act || !mono_signals) Handlers[sig] = reinterpret_cast<OrbisKernelExceptionHandler>(
+             act ? act->__sigaction_handler.sigaction : nullptr);
++        if (mono_signals && act) mono_actions[sig] = *act;
+ 
+         if (oact) {
+             oact->sa_flags = 0;
+@@ -499,6 +579,7 @@ s32 PS4_SYSV_ABI posix_sigaction(s32 sig, Sigaction* act, Sigaction* oact) {
+             posix_sigemptyset(&oact->sa_mask);
+         }
+ 
++        if (mono_signals && oact) *oact = old_mono_action;
+         return ORBIS_OK;
+     }
+     if (native_sig > 127) {
+@@ -515,14 +596,16 @@ s32 PS4_SYSV_ABI posix_sigaction(s32 sig, Sigaction* act, Sigaction* oact) {
+         return ORBIS_FAIL;
+     }
+ 
+-    Handlers[sig] = reinterpret_cast<OrbisKernelExceptionHandler>(
++    if (act || !mono_signals) Handlers[sig] = reinterpret_cast<OrbisKernelExceptionHandler>(
+         act ? act->__sigaction_handler.sigaction : nullptr);
++    if (mono_signals && act) mono_actions[sig] = *act;
+ 
+     if (oact) {
+         oact->sa_flags = native_oact.sa_flags;
+         oact->__sigaction_handler.sigaction =
+             reinterpret_cast<decltype(oact->__sigaction_handler.sigaction)>(prev_handler);
+         NativeSigsetToGuest(native_oact.sa_mask, oact->sa_mask);
++        if (mono_signals) *oact = old_mono_action;
+     }
+ #endif
+     return ORBIS_OK;
+@@ -547,8 +630,17 @@ s32 PS4_SYSV_ABI posix_pthread_sigmask(s32 how, const Sigset* set, Sigset* oset)
+         native_set_ptr = &native_set;
+     }
+ 
++    if (mono_signals && set) {
++        switch (how) {
++        case 1: how = SIG_BLOCK; break;
++        case 2: how = SIG_UNBLOCK; break;
++        case 3: how = SIG_SETMASK; break;
++        default: return POSIX_EINVAL;
++        }
++    }
+     const int ret = pthread_sigmask(how, native_set_ptr, oset ? &native_oset : nullptr);
+     if (ret != 0) {
++        if (mono_signals) { SetPosixErrno(ret); return *__Error(); }
+         SetPosixErrno(errno);
+         return ORBIS_FAIL;
+     }
+@@ -681,7 +773,7 @@ int PS4_SYSV_ABI sceKernelInstallExceptionHandler(s32 signum, OrbisKernelExcepti
+     }
+     LOG_INFO(Lib_Kernel, "Installing signal handler for {}", signum);
+     Sigaction act = {};
+-    act.sa_flags = POSIX_SA_SIGINFO | POSIX_SA_RESTART;
++    act.sa_flags = mono_signals ? 0x42 : POSIX_SA_SIGINFO | POSIX_SA_RESTART;
+     act.__sigaction_handler.sigaction =
+         reinterpret_cast<decltype(act.__sigaction_handler.sigaction)>(handler);
+     posix_sigemptyset(&act.sa_mask);
+@@ -701,7 +793,7 @@ int PS4_SYSV_ABI sceKernelRemoveExceptionHandler(s32 signum) {
+     int const native_signum = OrbisToNativeSignal(signum);
+     Handlers[signum] = nullptr;
+     Sigaction act = {};
+-    act.sa_flags = POSIX_SA_SIGINFO;
++    act.sa_flags = mono_signals ? 0x40 : POSIX_SA_SIGINFO;
+     act.__sigaction_handler.sigaction = nullptr;
+     posix_sigemptyset(&act.sa_mask);
+     s32 ret = posix_sigaction(signum, &act, nullptr);
+@@ -741,6 +833,9 @@ s32 PS4_SYSV_ABI sceKernelDebugRaiseExceptionOnReleaseMode(u32 error, s64 unk) {
+ }
+ 
+ void RegisterException(Core::Loader::SymbolsResolver* sym) {
++#if defined(__linux__) && defined(__x86_64__)
++    if (mono_signals) RegisterMonoSuspend(sym);
++#endif
+     LIB_OBJ("nQVWJEGHObc", "libkernel", 1, "libkernel", &g_sigintr);
+ 
+     LIB_FUNCTION("il03nluKfMk", "libkernel_unity", 1, "libkernel", sceKernelRaiseException);
+diff --git a/src/core/libraries/kernel/threads/mono_suspend.h b/src/core/libraries/kernel/threads/mono_suspend.h
+new file mode 100644
+index 00000000..96a9b5d9
+--- /dev/null
++++ b/src/core/libraries/kernel/threads/mono_suspend.h
+@@ -0,0 +1,124 @@
++// SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
++// SPDX-License-Identifier: GPL-2.0-or-later
++#pragma once
++#if defined(__linux__) && defined(__x86_64__)
++#include <linux/futex.h>
++#include <sys/syscall.h>
++#include <ucontext.h>
++#include <unistd.h>
++
++namespace Libraries::Kernel {
++// Emulator-private signal, excluded from guest signal masks and number mapping.
++// The signal handler never allocates, logs, or takes a host mutex.
++static void MonoWake(std::atomic<int>& state) {
++    syscall(SYS_futex, &state, FUTEX_WAKE_PRIVATE, 1, nullptr, nullptr, 0);
++}
++static void MonoWait(std::atomic<int>& state, int value) {
++    const timespec timeout{0, 10000000};
++    syscall(SYS_futex, &state, FUTEX_WAIT_PRIVATE, value, &timeout, nullptr, 0);
++}
++static_assert(std::atomic<int>::is_always_lock_free);
++static void MonoSuspendHandler(int, siginfo_t*, void* raw) {
++    const int saved_errno = errno;
++    auto* thread = g_curthread;
++    if (!thread)
++        return;
++    int expected = 1;
++    if (!thread->mono_suspend_state.compare_exchange_strong(expected, -1))
++        return;
++    thread->mono_suspend_context = raw;
++    thread->mono_suspend_state.store(2, std::memory_order_release);
++    MonoWake(thread->mono_suspend_state);
++    while (thread->mono_suspend_state.load(std::memory_order_acquire) == 2)
++        MonoWait(thread->mono_suspend_state, 2);
++    thread->mono_suspend_context = nullptr;
++    thread->mono_suspend_state.store(0, std::memory_order_release);
++    MonoWake(thread->mono_suspend_state);
++    errno = saved_errno;
++}
++static int PS4_SYSV_ABI mono_suspend_user_context(PthreadT thread) {
++    if (!thread || !thread->native_thr)
++        return POSIX_ESRCH;
++    if (thread == g_curthread)
++        return POSIX_EDEADLK;
++    int expected = 0;
++    if (!thread->mono_suspend_state.compare_exchange_strong(expected, 1))
++        return POSIX_EBUSY;
++    int result =
++        pthread_kill(static_cast<pthread_t>(thread->native_thr->GetHandle()), SIGRTMAX - 1);
++    if (result) {
++        thread->mono_suspend_state.store(0);
++        return POSIX_ESRCH;
++    }
++    for (unsigned waits = 0; thread->mono_suspend_state.load(std::memory_order_acquire) != 2;
++         ++waits) {
++        if (waits >= 500) {
++            expected = 1;
++            if (thread->mono_suspend_state.compare_exchange_strong(expected, 0))
++                return POSIX_EAGAIN;
++        }
++        MonoWait(thread->mono_suspend_state, thread->mono_suspend_state.load());
++    }
++    return 0;
++}
++static int PS4_SYSV_ABI mono_get_user_context(PthreadT thread, Ucontext* out) {
++    if (!thread || !out)
++        return POSIX_EINVAL;
++    if (thread->mono_suspend_state.load(std::memory_order_acquire) != 2)
++        return POSIX_EINVAL;
++    const auto* native = static_cast<const ucontext_t*>(thread->mono_suspend_context);
++    if (!native)
++        return POSIX_EINVAL;
++    *out = {};
++    auto& mc = out->uc_mcontext;
++    const auto& r = native->uc_mcontext.gregs;
++#define MONO_REG(name, reg) mc.mc_##name = r[REG_##reg]
++    MONO_REG(r8, R8);
++    MONO_REG(r9, R9);
++    MONO_REG(r10, R10);
++    MONO_REG(r11, R11);
++    MONO_REG(r12, R12);
++    MONO_REG(r13, R13);
++    MONO_REG(r14, R14);
++    MONO_REG(r15, R15);
++    MONO_REG(rdi, RDI);
++    MONO_REG(rsi, RSI);
++    MONO_REG(rbp, RBP);
++    MONO_REG(rbx, RBX);
++    MONO_REG(rdx, RDX);
++    MONO_REG(rax, RAX);
++    MONO_REG(rcx, RCX);
++    MONO_REG(rsp, RSP);
++    MONO_REG(rip, RIP);
++    MONO_REG(rflags, EFL);
++#undef MONO_REG
++    mc.mc_len = sizeof(Mcontext);
++    mc.mc_fpformat = 0x10002; // FreeBSD _MC_FPFMT_XMM
++    mc.mc_ownedfp = 0x20001;  // _MC_FPOWNED_FPU
++    if (native->uc_mcontext.fpregs)
++        std::memcpy(mc.mc_fpstate, native->uc_mcontext.fpregs, 512);
++    return 0;
++}
++static int PS4_SYSV_ABI mono_resume_user_context(PthreadT thread) {
++    if (!thread)
++        return POSIX_ESRCH;
++    int expected = 2;
++    if (!thread->mono_suspend_state.compare_exchange_strong(expected, 3))
++        return POSIX_EINVAL;
++    MonoWake(thread->mono_suspend_state);
++    while (thread->mono_suspend_state.load(std::memory_order_acquire) != 0)
++        MonoWait(thread->mono_suspend_state, 3);
++    return 0;
++}
++static void RegisterMonoSuspend(Core::Loader::SymbolsResolver* sym) {
++    struct sigaction action{};
++    action.sa_sigaction = MonoSuspendHandler;
++    action.sa_flags = SA_SIGINFO | SA_RESTART | SA_ONSTACK;
++    sigemptyset(&action.sa_mask);
++    ASSERT(::sigaction(SIGRTMAX - 1, &action, nullptr) == 0);
++    LIB_FUNCTION("cfjAjVTFG6A", "libkernel", 1, "libkernel", mono_suspend_user_context);
++    LIB_FUNCTION("YkGOXpJEtO8", "libkernel", 1, "libkernel", mono_get_user_context);
++    LIB_FUNCTION("QRdE7dBfNks", "libkernel", 1, "libkernel", mono_resume_user_context);
++}
++} // namespace Libraries::Kernel
++#endif
+diff --git a/src/core/libraries/kernel/threads/pthread.h b/src/core/libraries/kernel/threads/pthread.h
+index 26707aec..b56ca9f6 100644
+--- a/src/core/libraries/kernel/threads/pthread.h
++++ b/src/core/libraries/kernel/threads/pthread.h
+@@ -322,6 +322,8 @@ struct Pthread {
+     bool has_user_waiters;
+     int nwaiter_defer;
+     WakeSemaphore* defer_waiters[MaxDeferWaiters]{};
++    std::atomic<int> mono_suspend_state{0};
++    void* mono_suspend_context{};
+     Pthread* join_target{};
+     std::mutex join_wait_mutex;
+     std::condition_variable join_wait_cv;
+diff --git a/src/core/libraries/kernel/threads/pthread_spec.cpp b/src/core/libraries/kernel/threads/pthread_spec.cpp
+index b0e0984a..886c79ad 100644
+--- a/src/core/libraries/kernel/threads/pthread_spec.cpp
++++ b/src/core/libraries/kernel/threads/pthread_spec.cpp
+@@ -148,6 +148,7 @@ void RegisterSpec(Core::Loader::SymbolsResolver* sym) {
+     LIB_FUNCTION("WrOLvHU0yQM", "libScePosix", 1, "libkernel", posix_pthread_setspecific);
+ 
+     // Posix-Kernel
++    LIB_FUNCTION("6BpEZuDT7YI", "libkernel", 1, "libkernel", posix_pthread_key_delete);
+     LIB_FUNCTION("mqULNdimTn0", "libkernel", 1, "libkernel", posix_pthread_key_create);
+     LIB_FUNCTION("0-KXaS70xy4", "libkernel", 1, "libkernel", posix_pthread_getspecific);
+     LIB_FUNCTION("WrOLvHU0yQM", "libkernel", 1, "libkernel", posix_pthread_setspecific);
+diff --git a/src/core/libraries/libc_internal/libc_internal.cpp b/src/core/libraries/libc_internal/libc_internal.cpp
+index c87effdb..f6bddbea 100644
+--- a/src/core/libraries/libc_internal/libc_internal.cpp
++++ b/src/core/libraries/libc_internal/libc_internal.cpp
+@@ -2,6 +2,9 @@
+ // SPDX-License-Identifier: GPL-2.0-or-later
+ 
+ #include <common/va_ctx.h>
++#include <array>
++#include <atomic>
++namespace Libraries::Kernel { extern const char* g_environment[64]; }
+ #include "common/assert.h"
+ #include "common/logging/log.h"
+ #include "core/libraries/error_codes.h"
+@@ -16,7 +19,73 @@
+ 
+ namespace Libraries::LibcInternal {
+ 
++static const char* PS4_SYSV_ABI mono_getenv(const char* name) {
++    if (!name || !*name || std::strchr(name, '=')) return nullptr;
++    const size_t length = std::strlen(name);
++    for (const char* entry : Kernel::g_environment) {
++        if (!entry) break;
++        if (std::strncmp(entry, name, length) == 0 && entry[length] == '=') return entry + length + 1;
++    }
++    return nullptr;
++}
++using ConstraintHandler = void PS4_SYSV_ABI (*)(const char*, void*, int);
++static std::atomic<ConstraintHandler> mono_constraint_handler{};
++static ConstraintHandler PS4_SYSV_ABI mono_set_constraint_handler(ConstraintHandler handler) {
++    return mono_constraint_handler.exchange(handler);
++}
++
++// ASCII C-locale classification. The guest uses Dinkumware bit positions
++// (not the host libc table); index -1 is the EOF slot.
++static const u16* PS4_SYSV_ABI mono_getpctype() {
++    static constexpr auto table = [] {
++        std::array<u16, 257> values{};
++        for (unsigned c = 0; c < 128; ++c) {
++            u16 mask = 0;
++            if (c < 32 || c == 127) mask |= (c >= 9 && c <= 13) ? 0x40 : 0x80;
++            if (c == 32) mask |= 4;
++            if (c >= '0' && c <= '9') mask |= 0x21;
++            if (c >= 'A' && c <= 'Z') mask |= 2;
++            if (c >= 'a' && c <= 'z') mask |= 0x10;
++            if ((c >= 'A' && c <= 'F') || (c >= 'a' && c <= 'f')) mask |= 1;
++            if (c > 32 && c < 127 && !(mask & 0x32)) mask |= 8;
++            values[c + 1] = mask;
++        }
++        return values;
++    }();
++    return table.data() + 1;
++}
++
++template<bool Upper>
++static const u16* PS4_SYSV_ABI mono_case_table() {
++    static constexpr auto table = [] {
++        std::array<u16, 257> values{};
++        values[0] = 0xffff;
++        for (unsigned c=0; c<256; ++c) {
++            values[c+1] = Upper ? (c >= 'a' && c <= 'z' ? c - 32 : c)
++                                : (c >= 'A' && c <= 'Z' ? c + 32 : c);
++        }
++        return values;
++    }();
++    return table.data() + 1;
++}
++#ifdef __linux__
++static void PS4_SYSV_ABI mono_qsort(void* base, size_t count, size_t width,
++                                   int PS4_SYSV_ABI (*compare)(const void*, const void*)) {
++    std::qsort(base, count, width, compare);
++}
++#endif
++
+ void RegisterLib(Core::Loader::SymbolsResolver* sym) {
++    if (const char* enabled = std::getenv("SHADPS4_EXPERIMENTAL_MONO"); enabled && std::strcmp(enabled, "1") == 0) {
++#ifdef __linux__
++        LIB_FUNCTION("AEJdIVZTEmo", "libSceLibcInternal", 1, "libSceLibcInternal", mono_qsort);
++#endif
++        LIB_FUNCTION("1uJgoVq3bQU", "libSceLibcInternal", 1, "libSceLibcInternal", mono_case_table<false>);
++        LIB_FUNCTION("rcQCUr0EaRU", "libSceLibcInternal", 1, "libSceLibcInternal", mono_case_table<true>);
++        LIB_FUNCTION("smbQukfxYJM", "libSceLibcInternal", 1, "libSceLibcInternal", mono_getenv);
++        LIB_FUNCTION("ENLfKJEZTjE", "libSceLibcInternal", 1, "libSceLibcInternal", mono_set_constraint_handler);
++        LIB_FUNCTION("sUP1hBaouOw", "libSceLibcInternal", 1, "libSceLibcInternal", mono_getpctype);
++    }
+     RegisterlibSceLibcInternalMath(sym);
+     RegisterlibSceLibcInternalStr(sym);
+     RegisterlibSceLibcInternalMemory(sym);
+diff --git a/src/core/libraries/libc_internal/libc_internal_io.cpp b/src/core/libraries/libc_internal/libc_internal_io.cpp
+index a5a1ea7b..6296f91f 100644
+--- a/src/core/libraries/libc_internal/libc_internal_io.cpp
++++ b/src/core/libraries/libc_internal/libc_internal_io.cpp
+@@ -20,8 +20,10 @@
+ 
+ namespace Libraries::LibcInternal {
+ 
+-s32 PS4_SYSV_ABI internal_snprintf(char* s, u64 n, VA_ARGS) {
++s32 PS4_SYSV_ABI internal_snprintf(VA_ARGS) {
+     VA_CTX(ctx);
++    char* s = Common::vaArgPtr<char>(&ctx.va_list);
++    const auto n = static_cast<size_t>(Common::vaArgLongLong(&ctx.va_list));
+     return snprintf_ctx(s, n, &ctx);
+ }
+ 
+@@ -464,7 +466,108 @@ s32 PS4_SYSV_ABI internal_fclose(OrbisFILE* file) {
+     return 0;
+ }
+ 
++struct MonoDirectory {
++    s32 fd;
++    size_t next = 0, available = 0;
++    alignas(8) char buffer[4096];
++};
++static MonoDirectory* PS4_SYSV_ABI mono_opendir(const char* path) {
++    if (!path) { *Kernel::__Error() = POSIX_EFAULT; return nullptr; }
++    const auto fd = Kernel::posix_open(path, Kernel::ORBIS_KERNEL_O_DIRECTORY, 0);
++    if (fd < 0) return nullptr;
++    auto* dir = new(std::nothrow) MonoDirectory;
++    if (!dir) { Kernel::posix_close(fd); *Kernel::__Error() = POSIX_ENOMEM; return nullptr; }
++    dir->fd = fd;
++    return dir;
++}
++static Kernel::OrbisKernelDirent* PS4_SYSV_ABI mono_readdir(MonoDirectory* dir) {
++    if (!dir) { *Kernel::__Error() = POSIX_EBADF; return nullptr; }
++    for (;;) {
++        if (dir->next == dir->available) {
++            const auto count = Kernel::posix_getdents(dir->fd, dir->buffer, sizeof(dir->buffer));
++            if (count <= 0) return nullptr;
++            dir->next = 0; dir->available = count;
++        }
++        const size_t left = dir->available - dir->next;
++        auto* entry = reinterpret_cast<Kernel::OrbisKernelDirent*>(dir->buffer + dir->next);
++        if (left < 8 || entry->d_reclen < 8 || entry->d_reclen > left ||
++            8u + entry->d_namlen >= entry->d_reclen) {
++            *Kernel::__Error() = POSIX_EIO; return nullptr;
++        }
++        dir->next += entry->d_reclen;
++        if (entry->d_fileno) return entry;
++    }
++}
++static s32 PS4_SYSV_ABI mono_closedir(MonoDirectory* dir) {
++    if (!dir) { *Kernel::__Error() = POSIX_EBADF; return -1; }
++    const auto result = Kernel::posix_close(dir->fd);
++    delete dir;
++    return result;
++}
++static void PS4_SYSV_ABI mono_rewinddir(MonoDirectory* dir) {
++    if (!dir) { *Kernel::__Error() = POSIX_EBADF; return; }
++    if (Kernel::posix_lseek(dir->fd, 0, 0) >= 0) dir->next = dir->available = 0;
++}
++
++// Experimental libc bridge: guest SysV va_list and guest FILE are decoded
++// explicitly. Neither is passed to the host C library.
++static OrbisFILE mono_stderr_file = [] { OrbisFILE f{}; f._Handle = 2; f._Mode = 2; return f; }();
++
++static OrbisFILE mono_stdout_file = [] { OrbisFILE f{}; f._Handle = 1; f._Mode = 2; return f; }();
++
++static s32 PS4_SYSV_ABI mono_vsnprintf(char* dst, size_t size, const char* format,
++                                     Common::VaList* args) {
++    if (!format || !args || (size && !dst)) return -1;
++    auto copy = *args;
++    return _vsnprintf(_out_buffer, dst, format, &copy, size);
++}
++
++static size_t PS4_SYSV_ABI mono_fwrite(const void* data, size_t size, size_t count, OrbisFILE* file) {
++    if (!size || !count) return 0;
++    if (!data || !file || count > SIZE_MAX / size) return 0;
++    size_t written = 0;
++    while (written < size * count) {
++        const auto n = Kernel::sceKernelWrite(file->_Handle, static_cast<const char*>(data) + written,
++                                              size * count - written);
++        if (n <= 0) break;
++        written += n;
++    }
++    return written / size;
++}
++
++static s32 PS4_SYSV_ABI mono_fprintf(VA_ARGS) {
++    VA_CTX(ctx);
++    auto* file = Common::vaArgPtr<OrbisFILE>(&ctx.va_list);
++    const auto* format = Common::vaArgPtr<const char>(&ctx.va_list);
++    if (!file || !format) return -1;
++    auto copy = ctx.va_list;
++    const int size = _vsnprintf(_out_null, nullptr, format, &copy, 0);
++    if (size < 0) return -1;
++    std::vector<char> buffer(static_cast<size_t>(size) + 1);
++    _vsnprintf(_out_buffer, buffer.data(), format, &ctx.va_list, buffer.size());
++    size_t written = 0;
++    while (written < static_cast<size_t>(size)) {
++        const auto n = Kernel::sceKernelWrite(file->_Handle, buffer.data() + written, size - written);
++        if (n <= 0) return -1;
++        written += n;
++    }
++    return size;
++}
++
+ void RegisterlibSceLibcInternalIo(Core::Loader::SymbolsResolver* sym) {
++    const char* experiment = std::getenv("SHADPS4_EXPERIMENTAL_MONO");
++    if (experiment && std::strcmp(experiment, "1") == 0) {
++        LIB_FUNCTION("ay3uROQAc5A", "libSceLibcInternal", 1, "libSceLibcInternal", mono_opendir);
++        LIB_FUNCTION("lybyyKtP54c", "libSceLibcInternal", 1, "libSceLibcInternal", mono_readdir);
++        LIB_FUNCTION("XepdqehVYe4", "libSceLibcInternal", 1, "libSceLibcInternal", mono_closedir);
++        LIB_FUNCTION("kCKHi6JYtmM", "libSceLibcInternal", 1, "libSceLibcInternal", mono_rewinddir);
++        LIB_OBJ("2sWzhYqFH4E", "libSceLibcInternal", 1, "libSceLibcInternal", &mono_stdout_file);
++        LIB_OBJ("H8AprKeZtNg", "libSceLibcInternal", 1, "libSceLibcInternal", &mono_stderr_file);
++        LIB_FUNCTION("MpxhMh8QFro", "libSceLibcInternal", 1, "libSceLibcInternal", mono_fwrite);
++        LIB_FUNCTION("Q2V+iqvjgC0", "libSceLibcInternal", 1, "libSceLibcInternal", mono_vsnprintf);
++        LIB_FUNCTION("fffwELXNVFA", "libSceLibcInternal", 1, "libSceLibcInternal", mono_fprintf);
++    }
++
+     LIB_FUNCTION("eLdDw6l0-bU", "libSceLibcInternal", 1, "libSceLibcInternal", internal_snprintf);
+     LIB_FUNCTION("xGT4Mc55ViQ", "libSceLibcInternal", 1, "libSceLibcInternal", internal__Fofind);
+     LIB_FUNCTION("dREVnZkAKRE", "libSceLibcInternal", 1, "libSceLibcInternal", internal__Foprep);
+diff --git a/src/core/libraries/libc_internal/libc_internal_io.h b/src/core/libraries/libc_internal/libc_internal_io.h
+index f3edff81..0d258954 100644
+--- a/src/core/libraries/libc_internal/libc_internal_io.h
++++ b/src/core/libraries/libc_internal/libc_internal_io.h
+@@ -77,7 +77,7 @@ struct OrbisFILE {
+     Orbis__mbstate_t _mbstate;
+ };
+ 
+-s32 PS4_SYSV_ABI internal_snprintf(char* s, u64 n, VA_ARGS);
++s32 PS4_SYSV_ABI internal_snprintf(VA_ARGS);
+ void PS4_SYSV_ABI internal__Lockfilelock(OrbisFILE* file);
+ void PS4_SYSV_ABI internal__Unlockfilelock(OrbisFILE* file);
+ OrbisFILE* PS4_SYSV_ABI internal__Fofind();
+diff --git a/src/core/libraries/libc_internal/libc_internal_math.cpp b/src/core/libraries/libc_internal/libc_internal_math.cpp
+index baeefdf2..d954b6db 100644
+--- a/src/core/libraries/libc_internal/libc_internal_math.cpp
++++ b/src/core/libraries/libc_internal/libc_internal_math.cpp
+@@ -114,7 +114,17 @@ float PS4_SYSV_ABI internal_log10f(float x) {
+     return log10f(x);
+ }
+ 
++static double PS4_SYSV_ABI mono_fmod(double x, double y) { return std::fmod(x, y); }
++static int PS4_SYSV_ABI mono_signbit(double x) { return std::signbit(x); }
++static int PS4_SYSV_ABI mono_isnan(double x) { return std::isnan(x); }
++
+ void RegisterlibSceLibcInternalMath(Core::Loader::SymbolsResolver* sym) {
++    if (const char* enabled = std::getenv("SHADPS4_EXPERIMENTAL_MONO"); enabled && std::strcmp(enabled, "1") == 0) {
++        LIB_FUNCTION("pKwslsMUmSk", "libSceLibcInternal", 1, "libSceLibcInternal", mono_fmod);
++        LIB_FUNCTION("Rw4J-22tu1U", "libSceLibcInternal", 1, "libSceLibcInternal", mono_signbit);
++        LIB_FUNCTION("GfxAp9Xyiqs", "libSceLibcInternal", 1, "libSceLibcInternal", mono_isnan);
++    }
++
+     LIB_FUNCTION("H8ya2H00jbI", "libSceLibcInternal", 1, "libSceLibcInternal", internal_sin);
+     LIB_FUNCTION("Q4rRL34CEeE", "libSceLibcInternal", 1, "libSceLibcInternal", internal_sinf);
+     LIB_FUNCTION("2WE3BTYVwKM", "libSceLibcInternal", 1, "libSceLibcInternal", internal_cos);
 diff --git a/src/core/libraries/libc_internal/libc_internal_memory.cpp b/src/core/libraries/libc_internal/libc_internal_memory.cpp
-index b3d5e802..709dc423 100644
+index b3d5e802..21334c6f 100644
 --- a/src/core/libraries/libc_internal/libc_internal_memory.cpp
 +++ b/src/core/libraries/libc_internal/libc_internal_memory.cpp
-@@ -6,9 +6,40 @@
+@@ -6,13 +6,48 @@
  #include "core/libraries/error_codes.h"
  #include "core/libraries/libs.h"
  #include "libc_internal_memory.h"
@@ -186,12 +1011,21 @@ index b3d5e802..709dc423 100644
  void* PS4_SYSV_ABI internal_memset(void* s, int c, size_t n) {
      return std::memset(s, c, n);
  }
-@@ -49,6 +80,20 @@ void PS4_SYSV_ABI sceLibcHeapGetTraceInfo(HeapInfoInfo* info) {
+ 
++static void* PS4_SYSV_ABI mono_memmove(void* dst, const void* src, size_t count) {
++    return std::memmove(dst, src, count);
++}
++
+ void* PS4_SYSV_ABI internal_memcpy(void* dest, const void* src, size_t n) {
+     return std::memcpy(dest, src, n);
+ }
+@@ -49,6 +84,21 @@ void PS4_SYSV_ABI sceLibcHeapGetTraceInfo(HeapInfoInfo* info) {
  
  void RegisterlibSceLibcInternalMemory(Core::Loader::SymbolsResolver* sym) {
  
 +    if (const char* enabled = std::getenv("SHADPS4_EXPERIMENTAL_MONO");
 +        enabled && std::strcmp(enabled, "1") == 0) {
++        LIB_FUNCTION("+P6FRGH4LfA", "libSceLibcInternal", 1, "libSceLibcInternal", mono_memmove);
 +        LIB_FUNCTION("-hn1tcVHq5Q", "libSceLibcInternal", 1, "libSceLibcInternal",
 +                     mono_mspace_create);
 +        LIB_FUNCTION("OJjm-QOIHlI", "libSceLibcInternal", 1, "libSceLibcInternal",
@@ -207,12 +1041,64 @@ index b3d5e802..709dc423 100644
      LIB_FUNCTION("NFLs+dRJGNg", "libSceLibcInternal", 1, "libSceLibcInternal", internal_memcpy_s);
      LIB_FUNCTION("Q3VBxCXhUHs", "libSceLibcInternal", 1, "libSceLibcInternal", internal_memcpy);
      LIB_FUNCTION("8zTFvBIAIN8", "libSceLibcInternal", 1, "libSceLibcInternal", internal_memset);
+diff --git a/src/core/libraries/libc_internal/libc_internal_str.cpp b/src/core/libraries/libc_internal/libc_internal_str.cpp
+index e5c2e64b..ef897660 100644
+--- a/src/core/libraries/libc_internal/libc_internal_str.cpp
++++ b/src/core/libraries/libc_internal/libc_internal_str.cpp
+@@ -6,6 +6,7 @@
+ #include "core/libraries/error_codes.h"
+ #include "core/libraries/libs.h"
+ #include "libc_internal_str.h"
++#include "mono_safe_string.h"
+ 
+ namespace Libraries::LibcInternal {
+ 
+@@ -44,12 +45,7 @@ char* PS4_SYSV_ABI internal_strncpy(char* dest, const char* src, std::size_t cou
+ }
+ 
+ s32 PS4_SYSV_ABI internal_strncpy_s(char* dest, size_t destsz, const char* src, size_t count) {
+-#ifdef _WIN64
+-    return strncpy_s(dest, destsz, src, count);
+-#else
+-    std::strcpy(dest, src);
+-    return 0;
+-#endif
++    return MonoStrncpyS(dest, destsz, src, count);
+ }
+ 
+ char* PS4_SYSV_ABI internal_strcat(char* dest, const char* src) {
+@@ -60,7 +56,25 @@ const char* PS4_SYSV_ABI internal_strchr(const char* str, int c) {
+     return std::strchr(str, c);
+ }
+ 
++static char* PS4_SYSV_ABI mono_strcpy(char* dst, const char* src) {
++    return std::strcpy(dst, src);
++}
++
++static const char* PS4_SYSV_ABI mono_strstr(const char* text, const char* part) {
++    return std::strstr(text, part);
++}
++
++static const char* PS4_SYSV_ABI mono_strrchr(const char* text, int c) {
++    return std::strrchr(text, c);
++}
++
+ void RegisterlibSceLibcInternalStr(Core::Loader::SymbolsResolver* sym) {
++    if (const char* enabled = std::getenv("SHADPS4_EXPERIMENTAL_MONO"); enabled && std::strcmp(enabled, "1") == 0) {
++        LIB_FUNCTION("kiZSXIWd9vg", "libSceLibcInternal", 1, "libSceLibcInternal", mono_strcpy);
++        LIB_FUNCTION("viiwFMaNamA", "libSceLibcInternal", 1, "libSceLibcInternal", mono_strstr);
++        LIB_FUNCTION("9yDWMxEFdJU", "libSceLibcInternal", 1, "libSceLibcInternal", mono_strrchr);
++    }
++
+     LIB_FUNCTION("5Xa2ACNECdo", "libSceLibcInternal", 1, "libSceLibcInternal", internal_strcpy_s);
+     LIB_FUNCTION("K+gcnFFJKVc", "libSceLibcInternal", 1, "libSceLibcInternal", internal_strcat_s);
+     LIB_FUNCTION("Ovb2dSJOAuE", "libSceLibcInternal", 1, "libSceLibcInternal", internal_strcmp);
 diff --git a/src/core/libraries/libc_internal/mono_mspace.h b/src/core/libraries/libc_internal/mono_mspace.h
 new file mode 100644
-index 00000000..ab4a5c7a
+index 00000000..2ef1cc0e
 --- /dev/null
 +++ b/src/core/libraries/libc_internal/mono_mspace.h
-@@ -0,0 +1,131 @@
+@@ -0,0 +1,186 @@
 +// SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +#pragma once
@@ -225,6 +1111,10 @@ index 00000000..ab4a5c7a
 +#include <memory>
 +#include <mutex>
 +#include <unordered_map>
++#ifdef __linux__
++#include <sys/mman.h>
++#include <unistd.h>
++#endif
 +
 +namespace Libraries::LibcInternal {
 +
@@ -234,8 +1124,12 @@ index 00000000..ab4a5c7a
 +public:
 +    ~MonoMspace() {
 +        for (const auto& [pointer, size] : allocations) {
-+            std::free(pointer);
++            Release(pointer);
 +        }
++#ifdef __linux__
++        for (const auto& [pointer, backing] : guarded)
++            ::munmap(backing.base, backing.size);
++#endif
 +    }
 +
 +    void* Allocate(size_t size, bool zero = false) {
@@ -259,7 +1153,7 @@ index 00000000..ab4a5c7a
 +        if (found == allocations.end()) {
 +            return false;
 +        }
-+        std::free(pointer);
++        Release(pointer);
 +        allocations.erase(found);
 +        return true;
 +    }
@@ -274,7 +1168,7 @@ index 00000000..ab4a5c7a
 +            return nullptr;
 +        }
 +        if (size == 0) {
-+            std::free(pointer);
++            Release(pointer);
 +            allocations.erase(found);
 +            return nullptr;
 +        }
@@ -285,7 +1179,7 @@ index 00000000..ab4a5c7a
 +        }
 +        std::memcpy(replacement, pointer, size < old_size ? size : old_size);
 +        allocations.erase(pointer); // AllocateLocked may have rehashed the map.
-+        std::free(pointer);
++        Release(pointer);
 +        return replacement;
 +    }
 +
@@ -295,18 +1189,65 @@ index 00000000..ab4a5c7a
 +        if (size > static_cast<size_t>(std::numeric_limits<ptrdiff_t>::max())) {
 +            return nullptr;
 +        }
-+        void* pointer = zero ? std::calloc(1, size ? size : 1) : std::malloc(size ? size : 1);
++        void* pointer = nullptr;
++#ifdef __linux__
++        if (guard_heap) {
++            const size_t page = static_cast<size_t>(::sysconf(_SC_PAGESIZE));
++            const size_t rounded = ((size ? size : 1) + 15) & ~size_t{15};
++            const size_t writable = (rounded + page - 1) & ~(page - 1);
++            const size_t total = writable + 2 * page;
++            void* base = ::mmap(nullptr, total, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
++            if (base == MAP_FAILED)
++                return nullptr;
++            auto* start = static_cast<char*>(base) + page;
++            if (::mprotect(start, writable, PROT_READ | PROT_WRITE) != 0) {
++                ::munmap(base, total);
++                return nullptr;
++            }
++            pointer = start + writable - rounded;
++            try {
++                guarded.emplace(pointer, GuardBacking{base, total});
++            } catch (const std::bad_alloc&) {
++                ::munmap(base, total);
++                return nullptr;
++            }
++        } else
++#endif
++            pointer = zero ? std::calloc(1, size ? size : 1) : std::malloc(size ? size : 1);
 +        if (!pointer) {
 +            return nullptr;
 +        }
 +        try {
 +            allocations.emplace(pointer, size);
 +        } catch (const std::bad_alloc&) {
-+            std::free(pointer);
++            Release(pointer);
 +            return nullptr;
 +        }
 +        return pointer;
 +    }
++    void Release(void* pointer) {
++#ifdef __linux__
++        if (guard_heap) {
++            const auto& block = guarded.at(pointer);
++            // Keep the address reserved until pool destruction: catches guest
++            // use-after-free without recycling it into another allocation.
++            ::mprotect(block.base, block.size, PROT_NONE);
++            return;
++        }
++#endif
++        std::free(pointer);
++    }
++#ifdef __linux__
++    const bool guard_heap = [] {
++        const char* value = std::getenv("SHADPS4_MONO_GUARD_HEAP");
++        return value && std::strcmp(value, "1") == 0;
++    }();
++    struct GuardBacking {
++        void* base;
++        size_t size;
++    };
++    std::unordered_map<void*, GuardBacking> guarded;
++#endif
 +    std::mutex mutex;
 +    std::unordered_map<void*, size_t> allocations;
 +};
@@ -344,11 +1285,118 @@ index 00000000..ab4a5c7a
 +    uintptr_t next = 1;
 +};
 +} // namespace Libraries::LibcInternal
+diff --git a/src/core/libraries/libc_internal/mono_safe_string.h b/src/core/libraries/libc_internal/mono_safe_string.h
+new file mode 100644
+index 00000000..f29b8523
+--- /dev/null
++++ b/src/core/libraries/libc_internal/mono_safe_string.h
+@@ -0,0 +1,39 @@
++// SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
++// SPDX-License-Identifier: GPL-2.0-or-later
++#pragma once
++#include <cstddef>
++#include <cstdint>
++#include <cstring>
++#include <limits>
++
++namespace Libraries::LibcInternal {
++// Dinkumware/Annex K bounded copy. A count-limited prefix need not include
++// the source terminator, but the destination always receives one on success.
++inline int MonoStrncpyS(char* dst, size_t capacity, const char* src, size_t count) {
++    constexpr int invalid = 22, range = 34, truncated = 80;
++    if (!dst || !capacity || capacity > static_cast<size_t>(PTRDIFF_MAX))
++        return invalid;
++    if (!src) {
++        dst[0] = 0;
++        return invalid;
++    }
++    const bool truncate = count == std::numeric_limits<size_t>::max();
++    const size_t limit = truncate ? capacity - 1 : (count < capacity ? count : capacity);
++    size_t length = 0;
++    while (length < limit && src[length])
++        ++length;
++    if (length == capacity) {
++        dst[0] = 0;
++        return range;
++    }
++    const auto d = reinterpret_cast<uintptr_t>(dst), s = reinterpret_cast<uintptr_t>(src);
++    if ((d >= s && d - s <= length) || (s > d && s - d <= length)) {
++        dst[0] = 0;
++        return invalid;
++    }
++    const bool cut = truncate && length == limit && src[length] != 0;
++    std::memcpy(dst, src, length);
++    dst[length] = 0;
++    return cut ? truncated : 0;
++}
++} // namespace Libraries::LibcInternal
+diff --git a/src/core/libraries/libc_internal/printf.h b/src/core/libraries/libc_internal/printf.h
+index c44110d0..3e88b452 100644
+--- a/src/core/libraries/libc_internal/printf.h
++++ b/src/core/libraries/libc_internal/printf.h
+@@ -410,10 +410,9 @@ static inline size_t _ftoa(out_fct_type out, char* buffer, size_t idx, size_t ma
+ 
+ // internal vsnprintf
+ static inline int _vsnprintf(out_fct_type out, char* buffer, const char* format,
+-                             Common::VaList* va_list) {
++                             Common::VaList* va_list, size_t maxlen = static_cast<size_t>(-1)) {
+     unsigned int flags, width, precision, n;
+     size_t idx = 0U;
+-    auto maxlen = static_cast<size_t>(-1);
+ 
+     if (!buffer) {
+         // use null output function
+@@ -732,7 +731,7 @@ static inline int _vsnprintf(out_fct_type out, char* buffer, const char* format,
+ static int printf_ctx(Common::VaCtx* ctx) {
+     const char* format = vaArgPtr<const char>(&ctx->va_list);
+     char buffer[256];
+-    int result = _vsnprintf(_out_buffer, buffer, format, &ctx->va_list);
++    int result = _vsnprintf(_out_buffer, buffer, format, &ctx->va_list, sizeof(buffer));
+     printf("%s", buffer);
+     return result;
+ }
+@@ -740,24 +739,18 @@ static int printf_ctx(Common::VaCtx* ctx) {
+ static int fprintf_ctx(Common::VaCtx* ctx, char* buf) {
+     const char* format = vaArgPtr<const char>(&ctx->va_list);
+     char buffer[256];
+-    int result = _vsnprintf(_out_buffer, buffer, format, &ctx->va_list);
++    int result = _vsnprintf(_out_buffer, buffer, format, &ctx->va_list, sizeof(buffer));
+     std::strcpy(buf, buffer);
+     return result;
+ }
+ 
+ static int vsnprintf_ctx(char* s, size_t n, const char* format, Common::VaList* arg) {
+-    std::vector<char> buffer(n);
+-    int result = _vsnprintf(_out_buffer, buffer.data(), format, arg);
+-    std::strcpy(s, buffer.data());
+-    return result;
++    return _vsnprintf(_out_buffer, s, format, arg, n);
+ }
+ 
+ static int snprintf_ctx(char* s, size_t n, Common::VaCtx* ctx) {
+     const char* format = vaArgPtr<const char>(&ctx->va_list);
+-    std::vector<char> buffer(n);
+-    int result = _vsnprintf(_out_buffer, buffer.data(), format, &ctx->va_list);
+-    std::strcpy(s, buffer.data());
+-    return result;
++    return _vsnprintf(_out_buffer, s, format, &ctx->va_list, n);
+ }
+ 
+ } // namespace Libraries::LibcInternal
+\ No newline at end of file
 diff --git a/src/core/memory.cpp b/src/core/memory.cpp
-index 4278a330..0ad2392d 100644
+index 4278a330..5ccce612 100644
 --- a/src/core/memory.cpp
 +++ b/src/core/memory.cpp
-@@ -710,6 +710,18 @@ s32 MemoryManager::MapFile(void** out_addr, VAddr virtual_addr, u64 size, Memory
+@@ -11,6 +11,7 @@
+ #include "core/libraries/kernel/orbis_error.h"
+ #include "core/libraries/kernel/process.h"
+ #include "core/memory.h"
++#include "core/mono_jit_memory.h"
+ #include "video_core/renderer_vulkan/vk_rasterizer.h"
+ 
+ namespace Core {
+@@ -710,6 +711,18 @@ s32 MemoryManager::MapFile(void** out_addr, VAddr virtual_addr, u64 size, Memory
          return ORBIS_KERNEL_ERROR_EBADF;
      }
  
@@ -367,7 +1415,7 @@ index 4278a330..0ad2392d 100644
      if (True(prot & MemoryProt::CpuWrite)) {
          // On PS4, read is appended to write mappings.
          prot |= MemoryProt::CpuRead;
-@@ -739,7 +751,7 @@ s32 MemoryManager::MapFile(void** out_addr, VAddr virtual_addr, u64 size, Memory
+@@ -739,7 +752,7 @@ s32 MemoryManager::MapFile(void** out_addr, VAddr virtual_addr, u64 size, Memory
          ASSERT_MSG(false, "Files cannot be mapped to GPU memory");
      }
  
@@ -376,6 +1424,198 @@ index 4278a330..0ad2392d 100644
          // On real hardware, execute permissions are silently removed.
          prot &= ~MemoryProt::CpuExec;
      }
+@@ -811,6 +824,12 @@ s32 MemoryManager::MapFile(void** out_addr, VAddr virtual_addr, u64 size, Memory
+     file->handle->Map(reinterpret_cast<u8*>(mapped_addr), size, phys_addr, std::bit_cast<u32>(prot),
+                       map_ctx);
+ 
++#if defined(__linux__) && defined(__x86_64__)
++    if (file->mono_jit) {
++        MonoJitMemory::Instance().Map(mapped_addr, size, static_cast<int>(handle), phys_addr,
++                                      static_cast<int>(prot));
++    }
++#endif
+     *out_addr = std::bit_cast<void*>(mapped_addr);
+     return ORBIS_OK;
+ }
+@@ -993,6 +1012,10 @@ u64 MemoryManager::UnmapBytesFromEntry(VAddr virtual_addr, VirtualMemoryArea vma
+ }
+ 
+ s32 MemoryManager::UnmapMemoryImpl(VAddr virtual_addr, u64 size) {
++#if defined(__linux__) && defined(__x86_64__)
++    MonoJitMemory::Instance().Unmap(virtual_addr, size);
++#endif
++
+     u64 unmapped_bytes = 0;
+     do {
+         auto it = FindVMA(virtual_addr + unmapped_bytes);
+diff --git a/src/core/mono_jit_memory.h b/src/core/mono_jit_memory.h
+new file mode 100644
+index 00000000..4c18cb58
+--- /dev/null
++++ b/src/core/mono_jit_memory.h
+@@ -0,0 +1,162 @@
++// SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
++// SPDX-License-Identifier: GPL-2.0-or-later
++#pragma once
++
++#if defined(__linux__) && defined(__x86_64__)
++#include <atomic>
++#include <map>
++#include <mutex>
++#include <sys/mman.h>
++#include <sys/stat.h>
++#include <ucontext.h>
++#include "common/decoder.h"
++#include "common/logging/log.h"
++#include "core/signals.h"
++#include "core/tls.h"
++
++namespace Core {
++// Mono emits FS-based TCB accesses after ELF loading. Linux reserves FS for
++// host libc, while shadPS4 keeps the guest TCB in GS. Track write/execute
++// transitions on JIT backing pages so fresh code is translated before use.
++class MonoJitMemory {
++    struct Page {
++        u64 device, inode, offset;
++        int prot;
++    };
++    std::map<uintptr_t, Page> pages;
++    std::mutex mutex;
++    std::once_flag handler_once;
++    std::atomic<uintptr_t> low{UINTPTR_MAX}, high{0};
++    static constexpr size_t page_size = 4096;
++
++    static bool SameBacking(const Page& a, const Page& b) {
++        return a.device == b.device && a.inode == b.inode && a.offset == b.offset;
++    }
++    static void Protect(uintptr_t addr, int prot) {
++        ASSERT_MSG(::mprotect(reinterpret_cast<void*>(addr), page_size, prot) == 0,
++                   "Cannot protect experimental JIT page {:#x}", addr);
++    }
++    static size_t Patch(uintptr_t addr, size_t size, size_t readable_tail = 0) {
++        size_t count = 0;
++        for (size_t cursor = 0; cursor < size;) {
++            auto* code = reinterpret_cast<u8*>(addr + cursor);
++            if (*code != 0x64) {
++                ++cursor;
++                continue;
++            }
++            ZydisDecodedInstruction instruction{};
++            ZydisDecodedOperand operands[ZYDIS_MAX_OPERAND_COUNT]{};
++            if (!ZYAN_SUCCESS(Common::Decoder::Instance()->decodeInstruction(
++                    instruction, operands, code, std::min<size_t>(15, size + readable_tail - cursor)))) {
++                ++cursor;
++                continue;
++            }
++            // Same TCB read shape as the existing ELF CPU patcher. Replacing
++            // only the segment prefix preserves instruction length/addresses.
++            if (instruction.mnemonic == ZYDIS_MNEMONIC_MOV &&
++                operands[0].type == ZYDIS_OPERAND_TYPE_REGISTER && operands[0].size == 64 &&
++                operands[1].type == ZYDIS_OPERAND_TYPE_MEMORY &&
++                operands[1].mem.segment == ZYDIS_REGISTER_FS &&
++                operands[1].mem.base == ZYDIS_REGISTER_NONE &&
++                operands[1].mem.index == ZYDIS_REGISTER_NONE && operands[1].mem.disp.value >= 0 &&
++                operands[1].mem.disp.value < sizeof(Tcb)) {
++                for (unsigned i = 0; i < instruction.raw.prefix_count; ++i) {
++                    if (instruction.raw.prefixes[i].value == 0x64) {
++                        code[i] = 0x65;
++                        ++count;
++                    }
++                }
++            }
++            // JIT pages mix code, padding and embedded data; a linear decode
++            // from the page base can cross a later method's first instruction.
++            // Inspect each possible instruction start for the narrow TCB shape.
++            ++cursor;
++        }
++        return count;
++    }
++
++    bool Fault(void* raw, uintptr_t address) {
++        if (address < low.load() || address >= high.load())
++            return false;
++        auto* ctx = static_cast<ucontext_t*>(raw);
++        const auto error = ctx->uc_mcontext.gregs[REG_ERR];
++        const bool execute = (error & 16) != 0, write = (error & 2) != 0;
++        const uintptr_t base = address & ~(page_size - 1);
++        std::scoped_lock lock{mutex};
++        auto found = pages.find(base);
++        if (found == pages.end())
++            return false;
++        const auto page = found->second;
++        if (execute && (page.prot & PROT_EXEC)) {
++            // Stop writes through every alias before translating this backing.
++            for (const auto& [alias, other] : pages) {
++                if (SameBacking(page, other))
++                    Protect(alias, PROT_READ);
++            }
++            Protect(base, PROT_READ | PROT_WRITE);
++            const auto next = pages.find(base + page_size);
++            const size_t tail = next != pages.end() && (next->second.prot & PROT_READ) ? 14 : 0;
++            size_t patched = Patch(base, page_size, tail);
++            const auto pc = static_cast<uintptr_t>(ctx->uc_mcontext.gregs[REG_RIP]);
++            if (pc > base && pc < base + page_size)
++                patched += Patch(pc, base + page_size - pc, tail);
++            if (pc < base && base - pc < 15) {
++                const auto previous = pages.find(base - page_size);
++                if (previous != pages.end() && (previous->second.prot & PROT_EXEC)) {
++                    Protect(previous->first, PROT_READ | PROT_WRITE);
++                    patched += Patch(pc, 15);
++                    Protect(previous->first, PROT_READ | PROT_EXEC);
++                }
++            }
++            Protect(base, PROT_READ | PROT_EXEC);
++            if (patched)
++                LOG_INFO(Core, "Mono JIT translated {} TLS reads at {:#x}", patched, base);
++            return true;
++        }
++        if (write && (page.prot & PROT_WRITE)) {
++            const auto pc = static_cast<uintptr_t>(ctx->uc_mcontext.gregs[REG_RIP]);
++            if (pc >= base && pc < base + page_size) {
++                LOG_ERROR(Core, "Self-modifying execution on one JIT page is unsupported");
++                return false;
++            }
++            // Writes invalidate executable aliases too, including after the
++            // guest has closed every descriptor for this shared backing.
++            for (const auto& [alias, other] : pages) {
++                if (SameBacking(page, other))
++                    Protect(alias, other.prot & ~PROT_EXEC);
++            }
++            return true;
++        }
++        return false;
++    }
++
++public:
++    static MonoJitMemory& Instance() {
++        static MonoJitMemory instance;
++        return instance;
++    }
++    static bool Handle(void* ctx, void* addr) {
++        return Instance().Fault(ctx, reinterpret_cast<uintptr_t>(addr));
++    }
++    void Map(uintptr_t addr, size_t size, int fd, u64 offset, int prot) {
++        struct stat info{};
++        ASSERT_MSG(::fstat(fd, &info) == 0, "JIT backing descriptor unavailable");
++        std::call_once(handler_once,
++                       [] { Signals::Instance()->RegisterAccessViolationHandler(Handle, 17); });
++        std::scoped_lock lock{mutex};
++        low.store(std::min(low.load(), addr));
++        high.store(std::max(high.load(), addr + size));
++        for (size_t pos = 0; pos < size; pos += page_size) {
++            pages[addr + pos] = Page{static_cast<u64>(info.st_dev), static_cast<u64>(info.st_ino),
++                                     offset + pos, prot};
++            Protect(addr + pos, prot & ~(PROT_EXEC | PROT_WRITE));
++        }
++    }
++    void Unmap(uintptr_t addr, size_t size) {
++        std::scoped_lock lock{mutex};
++        auto begin = pages.lower_bound(addr), end = pages.lower_bound(addr + size);
++        pages.erase(begin, end);
++    }
++};
++} // namespace Core
++#endif
 diff --git a/src/tests/mono_mspace.cpp b/src/tests/mono_mspace.cpp
 new file mode 100644
 index 00000000..0f97addd
@@ -444,4 +1684,79 @@ index 00000000..0f97addd
 +    assert(space->Allocate(19)); // Released by pool destructor, checked by ASan.
 +    std::puts("PASS Mono mspace: overflow, realloc preservation, isolation, alignment, lifetime, "
 +              "threads");
++}
+diff --git a/src/tests/mono_printf.cpp b/src/tests/mono_printf.cpp
+new file mode 100644
+index 00000000..cd2e7132
+--- /dev/null
++++ b/src/tests/mono_printf.cpp
+@@ -0,0 +1,38 @@
++// SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
++// SPDX-License-Identifier: GPL-2.0-or-later
++#include <cassert>
++#include <cstdarg>
++#include <cstdio>
++#include <cstring>
++#include "core/libraries/libc_internal/printf.h"
++
++// Native SysV caller supplies both register and stack arguments. The emulator
++// decodes its ABI layout explicitly, never passes guest va_list to host printf.
++static int format(char* dst, size_t n, const char* fmt, ...) {
++    va_list args;
++    va_start(args, fmt);
++    static_assert(sizeof(args) == sizeof(Common::VaList));
++    Common::VaList guest{};
++    std::memcpy(&guest, args, sizeof(guest));
++    const int result = Libraries::LibcInternal::_vsnprintf(Libraries::LibcInternal::_out_buffer,
++                                                           dst, fmt, &guest, n);
++    va_end(args);
++    return result;
++}
++int main() {
++    char buf[256];
++    assert(format(buf, sizeof(buf), "%s %d %u %ld %lld %zu %.2f", "hello", -42, 42u, 12345678901L,
++                  23456789012LL, size_t{17}, 1.25) == 44);
++    assert(!strcmp(buf, "hello -42 42 12345678901 23456789012 17 1.25"));
++    assert(format(buf, sizeof(buf), "%d%d%d%d%d%d%d%d", 1, 2, 3, 4, 5, 6, 7, 8) == 8);
++    assert(!strcmp(buf, "12345678"));
++    char tiny[5] = {'X', 'X', 'X', 'X', 'X'};
++    assert(format(tiny + 1, 3, "%s", "abcdef") == 6);
++    assert(tiny[0] == 'X' && tiny[1] == 'a' && tiny[2] == 'b' && tiny[3] == 0 && tiny[4] == 'X');
++    assert(format(nullptr, 0, "%s:%d", "hello", 42) == 8);
++    assert(format(tiny, 0, "ignored") == 7 && tiny[0] == 'X');
++    assert(format(tiny, 1, "ignored") == 7 && tiny[0] == 0);
++    assert(format(buf, sizeof(buf), "%*.*s", 7, 3, "abcdef") == 7);
++    assert(!strcmp(buf, "    abc"));
++    puts("PASS Mono formatting: SysV registers/stack, mixed types, bounded writes, sizing");
++}
+diff --git a/src/tests/mono_safe_string.cpp b/src/tests/mono_safe_string.cpp
+new file mode 100644
+index 00000000..1a4afee1
+--- /dev/null
++++ b/src/tests/mono_safe_string.cpp
+@@ -0,0 +1,25 @@
++// SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
++// SPDX-License-Identifier: GPL-2.0-or-later
++#include <cassert>
++#include <cstdio>
++#include "core/libraries/libc_internal/mono_safe_string.h"
++using Libraries::LibcInternal::MonoStrncpyS;
++int main() {
++    char bounded[5] = {'X', 'X', 'X', 'X', 'X'};
++    assert(MonoStrncpyS(bounded + 1, 3, "abcdef", 2) == 0);
++    assert(bounded[0] == 'X' && bounded[4] == 'X' && !std::strcmp(bounded + 1, "ab"));
++    assert(MonoStrncpyS(bounded + 1, 3, "abcdef", 6) == 34);
++    assert(bounded[1] == 0 && bounded[0] == 'X' && bounded[4] == 'X');
++    assert(MonoStrncpyS(bounded + 1, 3, "a", 6) == 0 && !std::strcmp(bounded + 1, "a"));
++    assert(MonoStrncpyS(bounded + 1, 3, "abc", 0) == 0 && bounded[1] == 0);
++    assert(MonoStrncpyS(bounded + 1, 3, "abcdef", SIZE_MAX) == 80);
++    assert(!std::strcmp(bounded + 1, "ab") && bounded[4] == 'X');
++    char no_terminator[2] = {'a', 'b'};
++    assert(MonoStrncpyS(bounded + 1, 3, no_terminator, 2) == 0);
++    assert(MonoStrncpyS(nullptr, 3, "a", 1) == 22);
++    assert(MonoStrncpyS(bounded, 0, "a", 1) == 22 && bounded[0] == 'X');
++    assert(MonoStrncpyS(bounded, 5, nullptr, 1) == 22 && bounded[0] == 0);
++    char overlap[8] = "abcdef";
++    assert(MonoStrncpyS(overlap + 1, 7, overlap, 4) == 22 && overlap[1] == 0);
++    puts("PASS Mono strncpy_s: bounded prefix, nonterminated source, truncation, errors, overlap");
 +}
