@@ -1,5 +1,12 @@
 # Automatiserad PS4-benchmark 0.01
 
+Senaste mätkandidat är **0.02**: experimentell SMS-läsväg, samma fem spel och
+referenshashar. Paketet finns i `dist/eutherdrive-auto-benchmark-0.02.pkg`.
+Det uppdaterar benchmarkappen EDBM00001. Fysisk prestandavinst är ännu inte
+verifierad; [kandidatens tester och begränsningar](SMS-READ-CANDIDATE.md).
+Instruktionerna nedan för 0.01 gäller även 0.02, med det nya paketnamnet.
+
+
 Separat app: **EutherDrive Auto Benchmark**, titel-ID `EDBM00001`.
 Den vanliga spelaren (`EDRM00001`) behöver inte avinstalleras.
 Paket: `dist/eutherdrive-auto-benchmark-0.01.pkg`.
