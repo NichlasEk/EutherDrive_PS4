@@ -95,7 +95,7 @@ static int gb_render(const uint32_t *pixels, int count, const char *menu) {
     if (!menu) {
         for(int i=0;i<1280*32;++i)frame[i]=0xff091119;
         char performance[160];
-        snprintf(performance,sizeof(performance),"Vulkan 0.17 | %s",player_performance);
+        snprintf(performance,sizeof(performance),"Vulkan 0.18 | %s",player_performance);
         draw_text_at(frame,36,10,performance,0xff5eead4);
         goto prepared;
     }

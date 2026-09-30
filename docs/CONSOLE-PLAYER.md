@@ -1,17 +1,23 @@
-# EutherDrive Consoles — CPU 0.15 / Vulkan 0.17
+# EutherDrive Consoles — CPU 0.15 / Vulkan 0.18
 
-**Vulkan-test finns nu:** `dist/eutherdrive-vulkan-player-0.17.pkg`.
+**Vulkan-test finns nu:** `dist/eutherdrive-vulkan-player-0.18.pkg`.
 CPU-jämförelse: `dist/eutherdrive-console-player-0.15.pkg`. Båda paketen använder
 exakt samma managed assembly, ROM:ar och kontroller; den native grafikvägen skiljer.
-Användaren rapporterar att 0.16 inte startade på fysisk PS4. Exakt fel och
-orsak är ännu okända. 0.17 matchar ScummVM:s `-z max-page-size=0x4000`
-(vårt tidigare ELF hade ett LOAD-segment med 0x1000 alignment), startar GPU
-före Mono och sparar bootstraploggar. Alla LOAD-segment granskas vid bygge.
-shadPS4 når `VULKAN ready` med shaderpipeline; sedan stoppar emulatorns
-befintliga libkernel/rättighetsbegränsning Mono-vägen. Shaderlogiken är också
-GPU-testad på desktop; fysisk PS4-start och hastighetsvinst återstår.
+0.16 och 0.17 startade inte på fysisk PS4 enligt användaren. 0.18 byter till
+Doom3-Ps4:s Vulkan/OpenGNM/PSBC-arkiv. ICD-hashen matchar Doom3 bundled 0.07:s
+build-info; arkiven låses av `scripts/doom3-vulkan.sha256`.
+SDK:s create-fself producerade dubbla RW LOAD-segment och trunkerade
+initialiserad data i 0.17. Samma ELF konverterad med Doom3:s source-built
+create-fself (upstream f2da6229684ce320f673c06fceac9c218f621788) saknar båda
+felen. `scripts/verify-oelf.py` stoppar nu sådana artefakter efter konvertering.
+Det är ett konstaterat binärfel; fysisk start med korrigeringen återstår.
 
-0.15/0.17 visar FPS och core/audio/video-ms direkt under spelet, uppdaterat var
+0.18:s första frame kontrolleras före Mono och driverloggen hålls öppen tills
+första submit/fence/flip lyckats. shadPS4 passerar detta, sedan stoppar dess
+befintliga libkernel/rättighetsbegränsning Mono-vägen. Desktop GPU-kontroll av
+färger, skalning och HUD passerar också. Detta bevisar inte fysisk PS4-start.
+
+0.15/0.18 visar FPS och core/audio/video-ms direkt under spelet, uppdaterat var
 annan sekund. Mätningen är genomsnittet sedan spelstart. Fota raden efter cirka
 30 sekunder i samma spel på båda versionerna. Stäng appen före paketbyte.
 Om core dominerar behöver själva C#-kärnan optimeras; GPU-skalning löser den
@@ -27,16 +33,16 @@ som inträffade på konsolen.
 
 ## Vulkan-väg
 
-Återanvänder lokala OpenGNM/vulkan-ps4/PSBC-arkiv från ut99-orbis. Arkivhashar
+Återanvänder låsta OpenGNM/vulkan-ps4/PSBC-arkiv från Doom3-Ps4. Arkivhashar
 sparas i paketet och byggkatalogen; källstacken ändras inte här. All grafik
 går genom Vulkan-API till OpenGNM/GNM; inga Piglet-/Shacc-beroenden.
 Vulkan startas före Mono, med ensam VideoOut-ägare från början, som i
-ScummVM-PS4:s ps4gl-main.c. CPU-buffertarna är vanliga uploadkällor. Spelbilden laddas upp i sin ursprungliga storlek som BGRA-textur,
-en nearest-filtershader skalar den med samma heltalsskala. Mätfältet är en
+ScummVM-PS4:s ps4gl-main.c. CPU-buffertarna är vanliga uploadkällor. Spelbilden laddas upp i sin ursprungliga storlek som RGBA-textur med BGRA-källdata; shadern byter
+röd/blå kanal eftersom Doom3:s linjära bildväg kräver RGBA.
+Nearest-filtershadern skalar den med samma heltalsskala. Mätfältet är en
 separat liten textur. CPU:n skapar fortfarande emulatorernas spelbilder.
 
-Direkt `vkCmdBlitImage` kan inte skala i den återanvända ICD-versionen;
-shadern undviker den begränsningen. GPU acquire/render-fence väntar högst två
+GPU acquire/render-fence väntar högst två
 sekunder. En lokal wrap av OpenGNM:s flip-helper använder också begränsad
 statuspollning och fångar returnerade flip-fel som ICD:n annars ignorerar.
 Resurser behålls till processavslut vid GPU-fel. Allocator-lås aktiveras före

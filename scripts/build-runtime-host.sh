@@ -44,8 +44,13 @@ actual=$(sha256sum "$reference/sce_module/libmonosgen-2.0.prx" | cut -d ' ' -f 1
 
 # core_define contains separately selected compiler defines.
 if [ "${ED_VULKAN_PLAYER:-0}" = 1 ]; then
-    stack=${ED_VULKAN_STACK:-$project_dir/../ut99-orbis/build/native}
+    stack=${ED_VULKAN_STACK:-$project_dir/../Doom3-Ps4/build/native}
     [ -f "$stack/vulkan-ps4/libvulkan_ps4.a" ] && [ -f "$stack/libpsbc-private.a" ] || { echo 'Build the existing native Vulkan stack first' >&2; exit 1; }
+    # Freeze the Doom3 candidate whose ICD hash matches bundled 0.07 build-info.
+    # Explicit alternate stacks remain opt-in; record their actual hashes too.
+    if [ -z "${ED_VULKAN_STACK:-}" ]; then
+        (cd "$stack" && sha256sum -c "$project_dir/scripts/doom3-vulkan.sha256")
+    fi
     core_define="$core_define -DVULKAN_PLAYER"
     cc -Wall -Wextra -Werror "$project_dir/probes/runtime/test-vulkan-flip.c" -o "$output/test-vulkan-flip"
     "$output/test-vulkan-flip"
@@ -82,5 +87,12 @@ with open(sys.argv[1], 'rb') as elf:
             assert alignment>=0x4000 and (file_offset-address)%0x4000==0, 'PS4 LOAD page alignment'
 print('PASS PS4 ELF LOAD segments use 16 KiB alignment')
 PYELF
-"$toolchain/bin/linux/create-fself" -in="$output/host.elf" \
+# Same source-built converter used by Doom3; the SDK binary duplicates the
+# RELRO/data LOAD and truncates initialized data in this C++/Vulkan executable.
+converter=${CREATE_FSELF:-$project_dir/../ut99-orbis/build/create-fself-current}
+[ -x "$converter" ] || { echo 'Set CREATE_FSELF to the source-built Doom3 converter' >&2; exit 1; }
+sha256sum "$converter" > "$output/fself-tool.sha256"
+"$converter" -in="$output/host.elf" \
     -out="$output/host.oelf" --eboot "$output/eboot.bin" --paid 0x3800000000000011
+
+python3 "$project_dir/scripts/verify-oelf.py" "$output/host.oelf"

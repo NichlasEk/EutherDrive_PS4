@@ -39,8 +39,8 @@ fi
 
 if [ "${ED_VULKAN_PLAYER:-0}" = 1 ]; then
     [ "${ED_CONSOLE_PLAYER:-0}" = 1 ] || { echo 'Vulkan needs ED_CONSOLE_PLAYER=1' >&2; exit 1; }
-    version=0.17
-    package_name=eutherdrive-vulkan-player-0.17.pkg
+    version=0.18
+    package_name=eutherdrive-vulkan-player-0.18.pkg
     title='EutherDrive Vulkan Test'
 fi
 
@@ -107,6 +107,7 @@ cp "$project_dir/assets/icons/icon0.png" "$stage_dir/sce_sys/"
 if [ "${ED_VULKAN_PLAYER:-0}" = 1 ]; then
     cp "$project_dir"/probes/runtime/licenses/*.txt "$stage_dir/"
     cp "$build_dir/vulkan-archives.sha256" "$stage_dir/VULKAN-ARCHIVES.txt"
+    cp "$build_dir/fself-tool.sha256" "$stage_dir/FSELF-TOOL.txt"
 fi
 if [ "${ED_GB_PROBE:-0}" = 1 ]; then
     cp "$project_dir/probes/gb/THIRD-PARTY-NOTICES.md" "$stage_dir/GB-NOTICES.txt"

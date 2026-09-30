@@ -26,7 +26,7 @@ static VkFramebuffer ed_vk_targets[2];
 static VkBuffer ed_vk_readback;
 static void *ed_vk_readback_pixels;
 #endif
-static int ed_vk_ready, ed_vk_lost;
+static int ed_vk_ready, ed_vk_lost, ed_vk_presented;
 static VkResult ed_vk_error;
 static const char *ed_vk_operation;
 static struct EdVkTexture {
@@ -38,6 +38,10 @@ static struct EdVkTexture {
 static void ed_vk_checkpoint(const char *operation) {
 #ifndef ED_VK_OFFSCREEN
     if (!ed_vk_ready) report("VULKAN init: %s",operation);
+    else if (!ed_vk_presented) {
+        extern void vk_ps4_log_raw(const char *);
+        vk_ps4_log_raw(operation);
+    }
 #else
     (void)operation;
 #endif
@@ -62,8 +66,9 @@ static int ed_vk_texture(int index, const uint32_t *pixels, int width, int heigh
         if(t->mapped)vkUnmapMemory(ed_vk_device,t->memory);
         if(t->memory)vkFreeMemory(ed_vk_device,t->memory,NULL);
         memset(t,0,sizeof(*t));
+        // Doom3 ICD supports linear RGBA8. The shader swaps uploaded BGRA channels.
         VkImageCreateInfo image={.sType=VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,.imageType=VK_IMAGE_TYPE_2D,
-            .format=VK_FORMAT_B8G8R8A8_UNORM,.extent={(uint32_t)width,(uint32_t)height,1},
+            .format=VK_FORMAT_R8G8B8A8_UNORM,.extent={(uint32_t)width,(uint32_t)height,1},
             .mipLevels=1,.arrayLayers=1,.samples=VK_SAMPLE_COUNT_1_BIT,.tiling=VK_IMAGE_TILING_LINEAR,
             .usage=VK_IMAGE_USAGE_SAMPLED_BIT,.initialLayout=VK_IMAGE_LAYOUT_PREINITIALIZED};
         ED_VK_TRY(vkCreateImage(ed_vk_device,&image,NULL,&t->image));
@@ -199,10 +204,6 @@ static int ed_vk_init(void) {
     VkFenceCreateInfo fence={.sType=VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
     ED_VK_TRY(vkCreateFence(ed_vk_device,&fence,NULL,&ed_vk_fence));
     ED_VK_TRY(vkCreateFence(ed_vk_device,&fence,NULL,&ed_vk_acquire));
-    // Driver breadcrumbs flush every API call; close after init so they cannot dominate timings.
-#ifndef ED_VK_OFFSCREEN
-    extern void vk_ps4_log_close(void);vk_ps4_log_close();
-#endif
     ed_vk_ready=1;return 1;
 }
 static void ed_vk_prepare_texture(int index) {
@@ -267,6 +268,13 @@ static int ed_vk_present(const uint32_t *pixels,int width,int height,int left,in
         ed_vk_error=VK_ERROR_SURFACE_LOST_KHR;ed_vk_operation="VideoOut flip";ed_vk_lost=1;return 0;
     }
 #endif
+    // Keep driver evidence through the first real submit/fence/flip.
+#ifndef ED_VK_OFFSCREEN
+    if (!ed_vk_presented) {
+        extern void vk_ps4_log_close(void);vk_ps4_log_close();
+    }
+#endif
+    ed_vk_presented=1;
     return 1;
 }
 #undef ED_VK_TRY
