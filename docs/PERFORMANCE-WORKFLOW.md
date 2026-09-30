@@ -156,3 +156,14 @@ CPU's cycle costs here. Thus this can improve runtime compatibility and
 code-path comparisons, but does not eliminate the need to profile the 19 FPS
 case on hardware. A corresponding physical stage/microbenchmark is needed
 to separate runtime/JIT cost from CPU and presentation costs.
+
+
+### Experimental emulator development (2026-09-30)
+
+The initial missing-mspace/JIT blockers now have opt-in implementations in
+our pinned shadPS4 patch. See `patches/shadps4-mono/README.md` for build,
+probe commands and evidence. Native shared-alias execution returns 42 after
+descriptor closure; Mono also successfully allocates/maps its own JIT memory.
+Managed startup still fails during libc-dependent initialization. No managed
+ROM FPS in shadPS4 has been obtained. Next is ABI-correct diagnostic formatting
+and the remaining runtime calls, before gameplay or performance comparisons.

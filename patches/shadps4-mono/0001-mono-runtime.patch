@@ -1,0 +1,447 @@
+diff --git a/src/core/file_sys/fs.h b/src/core/file_sys/fs.h
+index d05b00ed..265267a8 100644
+--- a/src/core/file_sys/fs.h
++++ b/src/core/file_sys/fs.h
+@@ -135,6 +135,10 @@ enum class FileType {
+ };
+ 
+ struct File {
++    // Opt-in Mono JIT objects use ordinary descriptor lifetime, but retain
++    // executable/shared mmap permissions which ordinary files do not have.
++    bool mono_jit = false;
++    u32 mono_jit_protection = 0;
+     std::atomic_bool is_opened{};
+     std::atomic<FileType> type{FileType::Regular};
+     std::filesystem::path m_host_name;
+diff --git a/src/core/libraries/kernel/memory.cpp b/src/core/libraries/kernel/memory.cpp
+index ef4d39cc..9d7423ce 100644
+--- a/src/core/libraries/kernel/memory.cpp
++++ b/src/core/libraries/kernel/memory.cpp
+@@ -16,6 +16,7 @@
+ #include "core/libraries/libs.h"
+ #include "core/linker.h"
+ #include "core/memory.h"
++#include "mono_jit.h"
+ 
+ namespace Libraries::Kernel {
+ 
+@@ -893,6 +894,14 @@ s32 PS4_SYSV_ABI sceKernelGetPrtAperture(s32 id, VAddr* address, u64* size) {
+ }
+ 
+ void RegisterMemory(Core::Loader::SymbolsResolver* sym) {
++#ifdef __linux__
++    if (const char* enabled = std::getenv("SHADPS4_EXPERIMENTAL_MONO"); enabled &&
++        std::strcmp(enabled, "1") == 0) {
++        LIB_FUNCTION("avvJ3J0H0EY", "libkernel", 1, "libkernel", mono_jit_create);
++        LIB_FUNCTION("MR221Mwo0Pc", "libkernel", 1, "libkernel", mono_jit_alias);
++        LIB_FUNCTION("YKT49TOLQWs", "libkernel", 1, "libkernel", mono_jit_map);
++    }
++#endif
+     ASSERT_MSG(sceKernelGetCompiledSdkVersion(&g_sdk_version) == ORBIS_OK,
+                "Failed to get compiled SDK verision.");
+ 
+diff --git a/src/core/libraries/kernel/mono_jit.h b/src/core/libraries/kernel/mono_jit.h
+new file mode 100644
+index 00000000..6e216993
+--- /dev/null
++++ b/src/core/libraries/kernel/mono_jit.h
+@@ -0,0 +1,95 @@
++// SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
++// SPDX-License-Identifier: GPL-2.0-or-later
++#pragma once
++
++// Linux bring-up backend: memfd gives real shared backing and OS lifetime
++// across descriptor closure. Core::Memory supplies guest VMAs and protections.
++#ifdef __linux__
++#include <sys/mman.h>
++#include <unistd.h>
++#include "core/file_sys/backends/host_fs.h"
++#include "core/file_sys/fs.h"
++
++namespace Libraries::Kernel {
++
++static u32 MonoJitProtection(u32 prot) {
++    return prot | ((prot & 2) ? 1u : 0u);
++}
++
++static s32 MonoJitDescriptor(int host_fd, u32 prot, s32* output) {
++    using namespace Core::FileSys;
++    auto backing = std::make_unique<HostFile>(fmt::format("/proc/self/fd/{}", host_fd),
++                                              Common::FS::FileAccessMode::ReadWrite, false);
++    if (!backing->IsOpen()) {
++        return ORBIS_KERNEL_ERROR_ENOMEM;
++    }
++    auto* handles = Common::Singleton<HandleTable>::Instance();
++    const s32 fd = handles->CreateHandle();
++    auto* file = handles->GetFile(fd);
++    file->type = FileType::Regular;
++    file->handle = std::move(backing);
++    file->m_guest_name = "[experimental Mono JIT]";
++    file->mono_jit = true;
++    file->mono_jit_protection = MonoJitProtection(prot);
++    file->is_opened = true;
++    *output = fd;
++    return ORBIS_OK;
++}
++
++static s32 PS4_SYSV_ABI mono_jit_create(const char* name, u64 size, s32 prot, s32* output) {
++    if (!output)
++        return ORBIS_KERNEL_ERROR_EFAULT;
++    *output = -1;
++    if (!size || (size & 0x3fff) || size > INT64_MAX || prot <= 0 || (prot & ~7)) {
++        return ORBIS_KERNEL_ERROR_EINVAL;
++    }
++    const int backing = ::memfd_create("shadps4-mono-jit", MFD_CLOEXEC);
++    if (backing < 0)
++        return ORBIS_KERNEL_ERROR_ENOMEM;
++    s32 result = ORBIS_KERNEL_ERROR_ENOMEM;
++    if (::ftruncate(backing, static_cast<off_t>(size)) == 0) {
++        result = MonoJitDescriptor(backing, prot, output);
++    }
++    ::close(backing);
++    LOG_INFO(Kernel_Vmm, "Experimental JIT create: name={} size={:#x} prot={} fd={} result={}",
++             name ? name : "(null)", size, prot, *output, result);
++    return result;
++}
++
++static s32 PS4_SYSV_ABI mono_jit_alias(s32 fd, s32 prot, s32* output) {
++    if (!output)
++        return ORBIS_KERNEL_ERROR_EFAULT;
++    *output = -1;
++    auto* file = Common::Singleton<Core::FileSys::HandleTable>::Instance()->GetFile(fd);
++    if (!file || !file->mono_jit)
++        return ORBIS_KERNEL_ERROR_EBADF;
++    if (prot <= 0 || (prot & ~7))
++        return ORBIS_KERNEL_ERROR_EINVAL;
++    if ((MonoJitProtection(prot) & ~file->mono_jit_protection) != 0) {
++        return ORBIS_KERNEL_ERROR_EACCES;
++    }
++    const int backing = static_cast<int>(file->GetHostFile()->GetFileMapping());
++    const s32 result = MonoJitDescriptor(backing, prot, output);
++    LOG_INFO(Kernel_Vmm, "Experimental JIT alias: fd={} prot={} alias={} result={}", fd, prot,
++             *output, result);
++    return result;
++}
++
++static s32 PS4_SYSV_ABI mono_jit_map(s32 fd, s32 prot, void** output) {
++    if (!output)
++        return ORBIS_KERNEL_ERROR_EFAULT;
++    *output = nullptr;
++    auto* file = Common::Singleton<Core::FileSys::HandleTable>::Instance()->GetFile(fd);
++    if (!file || !file->mono_jit)
++        return ORBIS_KERNEL_ERROR_EBADF;
++    if (prot <= 0 || (prot & ~7))
++        return ORBIS_KERNEL_ERROR_EINVAL;
++    const auto result = Core::Memory::Instance()->MapFile(output, 0, file->GetSize(),
++                                                          static_cast<Core::MemoryProt>(prot),
++                                                          Core::MemoryMapFlags::Shared, fd, 0);
++    LOG_INFO(Kernel_Vmm, "Experimental JIT map: fd={} prot={} address={} result={}", fd, prot,
++             *output, result);
++    return result;
++}
++} // namespace Libraries::Kernel
++#endif
+diff --git a/src/core/libraries/libc_internal/libc_internal_memory.cpp b/src/core/libraries/libc_internal/libc_internal_memory.cpp
+index b3d5e802..709dc423 100644
+--- a/src/core/libraries/libc_internal/libc_internal_memory.cpp
++++ b/src/core/libraries/libc_internal/libc_internal_memory.cpp
+@@ -6,9 +6,40 @@
+ #include "core/libraries/error_codes.h"
+ #include "core/libraries/libs.h"
+ #include "libc_internal_memory.h"
++#include "mono_mspace.h"
+ 
+ namespace Libraries::LibcInternal {
+ 
++static MonoMspaces mono_mspaces;
++
++static void* PS4_SYSV_ABI mono_mspace_create(const char* name, void* base, size_t capacity,
++                                             unsigned flags) {
++    void* handle = mono_mspaces.Create(base, capacity, flags);
++    LOG_INFO(Lib_LibcInternal,
++             "Experimental Mono mspace: name={} base={} size={:#x} flags={:#x} handle={}",
++             name ? name : "(null)", base, capacity, flags, handle);
++    return handle;
++}
++static void* PS4_SYSV_ABI mono_mspace_malloc(void* handle, size_t size) {
++    auto space = mono_mspaces.Find(handle);
++    return space ? space->Allocate(size) : nullptr;
++}
++static void* PS4_SYSV_ABI mono_mspace_calloc(void* handle, size_t count, size_t size) {
++    auto space = mono_mspaces.Find(handle);
++    return space ? space->Calloc(count, size) : nullptr;
++}
++static void* PS4_SYSV_ABI mono_mspace_realloc(void* handle, void* pointer, size_t size) {
++    auto space = mono_mspaces.Find(handle);
++    return space ? space->Reallocate(pointer, size) : nullptr;
++}
++static void PS4_SYSV_ABI mono_mspace_free(void* handle, void* pointer) {
++    auto space = mono_mspaces.Find(handle);
++    if (!space || !space->Free(pointer)) {
++        LOG_ERROR(Lib_LibcInternal, "Invalid experimental mspace free: handle={} pointer={}",
++                  handle, pointer);
++    }
++}
++
+ void* PS4_SYSV_ABI internal_memset(void* s, int c, size_t n) {
+     return std::memset(s, c, n);
+ }
+@@ -49,6 +80,20 @@ void PS4_SYSV_ABI sceLibcHeapGetTraceInfo(HeapInfoInfo* info) {
+ 
+ void RegisterlibSceLibcInternalMemory(Core::Loader::SymbolsResolver* sym) {
+ 
++    if (const char* enabled = std::getenv("SHADPS4_EXPERIMENTAL_MONO");
++        enabled && std::strcmp(enabled, "1") == 0) {
++        LIB_FUNCTION("-hn1tcVHq5Q", "libSceLibcInternal", 1, "libSceLibcInternal",
++                     mono_mspace_create);
++        LIB_FUNCTION("OJjm-QOIHlI", "libSceLibcInternal", 1, "libSceLibcInternal",
++                     mono_mspace_malloc);
++        LIB_FUNCTION("LYo3GhIlB38", "libSceLibcInternal", 1, "libSceLibcInternal",
++                     mono_mspace_calloc);
++        LIB_FUNCTION("gigoVHZvVPE", "libSceLibcInternal", 1, "libSceLibcInternal",
++                     mono_mspace_realloc);
++        LIB_FUNCTION("Vla-Z+eXlxo", "libSceLibcInternal", 1, "libSceLibcInternal",
++                     mono_mspace_free);
++    }
++
+     LIB_FUNCTION("NFLs+dRJGNg", "libSceLibcInternal", 1, "libSceLibcInternal", internal_memcpy_s);
+     LIB_FUNCTION("Q3VBxCXhUHs", "libSceLibcInternal", 1, "libSceLibcInternal", internal_memcpy);
+     LIB_FUNCTION("8zTFvBIAIN8", "libSceLibcInternal", 1, "libSceLibcInternal", internal_memset);
+diff --git a/src/core/libraries/libc_internal/mono_mspace.h b/src/core/libraries/libc_internal/mono_mspace.h
+new file mode 100644
+index 00000000..ab4a5c7a
+--- /dev/null
++++ b/src/core/libraries/libc_internal/mono_mspace.h
+@@ -0,0 +1,131 @@
++// SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
++// SPDX-License-Identifier: GPL-2.0-or-later
++#pragma once
++
++#include <cstddef>
++#include <cstdint>
++#include <cstdlib>
++#include <cstring>
++#include <limits>
++#include <memory>
++#include <mutex>
++#include <unordered_map>
++
++namespace Libraries::LibcInternal {
++
++// Experimental host-backed dynamic mspaces. Only the observed Mono mode
++// (base=null, capacity=0, flags=6) is supported; not a fixed-arena allocator.
++class MonoMspace {
++public:
++    ~MonoMspace() {
++        for (const auto& [pointer, size] : allocations) {
++            std::free(pointer);
++        }
++    }
++
++    void* Allocate(size_t size, bool zero = false) {
++        std::scoped_lock lock{mutex};
++        return AllocateLocked(size, zero);
++    }
++
++    void* Calloc(size_t count, size_t size) {
++        if (size && count > std::numeric_limits<size_t>::max() / size) {
++            return nullptr;
++        }
++        return Allocate(count * size, true);
++    }
++
++    bool Free(void* pointer) {
++        if (!pointer) {
++            return true;
++        }
++        std::scoped_lock lock{mutex};
++        const auto found = allocations.find(pointer);
++        if (found == allocations.end()) {
++            return false;
++        }
++        std::free(pointer);
++        allocations.erase(found);
++        return true;
++    }
++
++    void* Reallocate(void* pointer, size_t size) {
++        if (!pointer) {
++            return Allocate(size);
++        }
++        std::scoped_lock lock{mutex};
++        auto found = allocations.find(pointer);
++        if (found == allocations.end()) {
++            return nullptr;
++        }
++        if (size == 0) {
++            std::free(pointer);
++            allocations.erase(found);
++            return nullptr;
++        }
++        const size_t old_size = found->second;
++        void* replacement = AllocateLocked(size, false);
++        if (!replacement) {
++            return nullptr; // Original allocation remains valid on failure.
++        }
++        std::memcpy(replacement, pointer, size < old_size ? size : old_size);
++        allocations.erase(pointer); // AllocateLocked may have rehashed the map.
++        std::free(pointer);
++        return replacement;
++    }
++
++private:
++    void* AllocateLocked(size_t size, bool zero) {
++        // PTRDIFF_MAX is also the host allocator's maximum object size.
++        if (size > static_cast<size_t>(std::numeric_limits<ptrdiff_t>::max())) {
++            return nullptr;
++        }
++        void* pointer = zero ? std::calloc(1, size ? size : 1) : std::malloc(size ? size : 1);
++        if (!pointer) {
++            return nullptr;
++        }
++        try {
++            allocations.emplace(pointer, size);
++        } catch (const std::bad_alloc&) {
++            std::free(pointer);
++            return nullptr;
++        }
++        return pointer;
++    }
++    std::mutex mutex;
++    std::unordered_map<void*, size_t> allocations;
++};
++
++class MonoMspaces {
++public:
++    void* Create(void* base, size_t capacity, unsigned flags) {
++        if (base || capacity || flags != 6) {
++            return nullptr;
++        }
++        std::scoped_lock lock{mutex};
++        try {
++            auto space = std::make_shared<MonoMspace>();
++            // Opaque handle is never dereferenced by the guest or the lookup.
++            auto handle = reinterpret_cast<void*>(next++);
++            spaces.emplace(handle, std::move(space));
++            return handle;
++        } catch (const std::bad_alloc&) {
++            return nullptr;
++        }
++    }
++    std::shared_ptr<MonoMspace> Find(void* handle) {
++        std::scoped_lock lock{mutex};
++        const auto found = spaces.find(handle);
++        return found == spaces.end() ? nullptr : found->second;
++    }
++    bool Destroy(void* handle) {
++        std::scoped_lock lock{mutex};
++        return spaces.erase(handle) != 0;
++    }
++
++private:
++    std::mutex mutex;
++    std::unordered_map<void*, std::shared_ptr<MonoMspace>> spaces;
++    uintptr_t next = 1;
++};
++} // namespace Libraries::LibcInternal
+diff --git a/src/core/memory.cpp b/src/core/memory.cpp
+index 4278a330..0ad2392d 100644
+--- a/src/core/memory.cpp
++++ b/src/core/memory.cpp
+@@ -710,6 +710,18 @@ s32 MemoryManager::MapFile(void** out_addr, VAddr virtual_addr, u64 size, Memory
+         return ORBIS_KERNEL_ERROR_EBADF;
+     }
+ 
++    if (file->mono_jit) {
++        const u32 requested = static_cast<u32>(prot) |
++                              (True(prot & MemoryProt::CpuWrite) ? 1u : 0u);
++        if ((requested & ~file->mono_jit_protection) != 0) {
++            return ORBIS_KERNEL_ERROR_EACCES;
++        }
++        if (phys_addr < 0 || static_cast<u64>(phys_addr) > file->GetSize() ||
++            size > file->GetSize() - static_cast<u64>(phys_addr)) {
++            return ORBIS_KERNEL_ERROR_EINVAL;
++        }
++    }
++
+     if (True(prot & MemoryProt::CpuWrite)) {
+         // On PS4, read is appended to write mappings.
+         prot |= MemoryProt::CpuRead;
+@@ -739,7 +751,7 @@ s32 MemoryManager::MapFile(void** out_addr, VAddr virtual_addr, u64 size, Memory
+         ASSERT_MSG(false, "Files cannot be mapped to GPU memory");
+     }
+ 
+-    if (True(prot & MemoryProt::CpuExec)) {
++    if (True(prot & MemoryProt::CpuExec) && !file->mono_jit) {
+         // On real hardware, execute permissions are silently removed.
+         prot &= ~MemoryProt::CpuExec;
+     }
+diff --git a/src/tests/mono_mspace.cpp b/src/tests/mono_mspace.cpp
+new file mode 100644
+index 00000000..0f97addd
+--- /dev/null
++++ b/src/tests/mono_mspace.cpp
+@@ -0,0 +1,63 @@
++// SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
++// SPDX-License-Identifier: GPL-2.0-or-later
++#include <cassert>
++#include <cstdio>
++#include <thread>
++#include <vector>
++#include "core/libraries/libc_internal/mono_mspace.h"
++using namespace Libraries::LibcInternal;
++int main() {
++    MonoMspaces registry;
++    assert(!registry.Create(reinterpret_cast<void*>(16), 1024, 6));
++    assert(!registry.Create(nullptr, 1024, 6));
++    assert(!registry.Create(nullptr, 0, 0));
++    void* handle = registry.Create(nullptr, 0, 6);
++    auto space = registry.Find(handle);
++    assert(space && !registry.Find(nullptr));
++    auto other = registry.Find(registry.Create(nullptr, 0, 6));
++    auto p = static_cast<unsigned char*>(space->Calloc(17, 13));
++    assert(p && reinterpret_cast<uintptr_t>(p) % 16 == 0);
++    for (int i = 0; i < 221; ++i) {
++        assert(p[i] == 0);
++        p[i] = static_cast<unsigned char>(i);
++    }
++    assert(!other->Free(p));
++    assert(!space->Reallocate(p, SIZE_MAX));
++    p = static_cast<unsigned char*>(space->Reallocate(p, 1024));
++    assert(p);
++    for (int i = 0; i < 221; ++i)
++        assert(p[i] == static_cast<unsigned char>(i));
++    p = static_cast<unsigned char*>(space->Reallocate(p, 32));
++    for (int i = 0; i < 32; ++i)
++        assert(p[i] == static_cast<unsigned char>(i));
++    assert(!space->Reallocate(p, 0));
++    assert(!space->Free(p));
++    assert(space->Free(nullptr));
++    assert(!space->Calloc(SIZE_MAX, 2));
++    assert(!space->Allocate(SIZE_MAX));
++    assert(space->Free(space->Reallocate(nullptr, 8)));
++    assert(space->Free(space->Allocate(0)));
++    std::vector<std::thread> threads;
++    for (int t = 0; t < 8; ++t)
++        threads.emplace_back([space] {
++            for (int i = 0; i < 2000; ++i) {
++                auto p = static_cast<unsigned char*>(space->Allocate(127));
++                assert(p);
++                std::memset(p, 0x5a, 127);
++                auto q = static_cast<unsigned char*>(space->Reallocate(p, 257));
++                assert(q);
++                for (int j = 0; j < 127; ++j)
++                    assert(q[j] == 0x5a);
++                assert(space->Free(q));
++            }
++        });
++    for (auto& thread : threads)
++        thread.join();
++    assert(registry.Destroy(handle));
++    assert(!registry.Find(handle));
++    assert(!registry.Destroy(handle));
++    // Outstanding lookup keeps a pool alive during destruction of its handle.
++    assert(space->Allocate(19)); // Released by pool destructor, checked by ASan.
++    std::puts("PASS Mono mspace: overflow, realloc preservation, isolation, alignment, lifetime, "
++              "threads");
++}
