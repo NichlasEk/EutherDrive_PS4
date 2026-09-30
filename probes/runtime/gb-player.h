@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 Nichlas Eklöf
 static int gb_pad = -1, gb_pad_owned;
+static int gb_pad_read_error, gb_pad_transient;
 static uint64_t gb_deadline;
 static void draw_text(uint32_t *, int, char *);
 static void draw_text_at(uint32_t *, int, int, char *, uint32_t);
@@ -25,9 +26,22 @@ static int gb_input(void) {
     }
     OrbisPadData data = {0};
     int rc = scePadReadState(gb_pad, &data);
-    if (rc < 0) { report("FAIL pad read: %08x", rc); return -1; }
-    return data.connected ? (int)data.buttons : 0;
+    gb_pad_read_error = rc < 0 ? rc : 0;
+    if (rc < 0) {
+        if ((uint32_t)rc == ORBIS_PAD_ERROR_DEVICE_NOT_CONNECTED ||
+            (uint32_t)rc == ORBIS_PAD_ERROR_SEND_AGAIN) {
+            if (!gb_pad_transient) report("WARN pad temporarily unavailable: %08x", (unsigned)rc);
+            gb_pad_transient = 1;
+            return 0;
+        }
+        report("FAIL pad read: %08x", (unsigned)rc); return -1;
+    }
+    gb_pad_transient = 0;
+    // NativeInput reserves negative values for errors. The SDK's actual button
+    // bits are in the low 16 bits plus touchpad (bit 20); exclude other flags.
+    return data.connected ? (int)(data.buttons & 0x0010ffffu) : 0;
 }
+static int gb_input_error(void) { return gb_pad_read_error; }
 
 #ifdef SMS_PLAYER
 #define PLAYER_WIDTH 256
@@ -56,6 +70,10 @@ static int player_period = PLAYER_PERIOD;
 static uint32_t library_preview[320*240];
 static int preview_width, preview_height;
 static int player_frontend_active;
+static char player_performance[128];
+static void console_performance(const char *text) {
+    snprintf(player_performance,sizeof(player_performance),"%s",text ? text : "");
+}
 static int console_preview(const uint32_t *pixels, int count, int width, int height) {
     if (!pixels && count==0) { preview_width=preview_height=0; return 1; }
     if (!pixels || width<1 || width>320 || height<1 || height>240 || count!=width*height) return 0;
@@ -64,12 +82,24 @@ static int console_preview(const uint32_t *pixels, int count, int width, int hei
     return 1;
 }
 static int gb_render(const uint32_t *pixels, int count, const char *menu) {
+#ifdef VULKAN_PLAYER
+    if (!start_vulkan()) return 0;
+#endif
     if ((!menu && (!pixels || count != player_width * player_height)) || video < 0 || !frames[0]) return 0;
     while (__atomic_test_and_set(&report_busy, __ATOMIC_ACQUIRE)) sceKernelUsleep(1000);
     player_frontend_active = 1;
     int index = sequence % 2;
     ++sequence;
     uint32_t *frame = frames[index];
+#ifdef VULKAN_PLAYER
+    if (!menu) {
+        for(int i=0;i<1280*32;++i)frame[i]=0xff091119;
+        char performance[160];
+        snprintf(performance,sizeof(performance),"Vulkan 0.16 | %s",player_performance);
+        draw_text_at(frame,36,10,performance,0xff5eead4);
+        goto prepared;
+    }
+#endif
     for (int i = 0; i < 1280 * 720; ++i) frame[i] = menu ? 0xff091119 : 0xff102020;
     if (!menu) {
         for (int y = 0; y < player_height; ++y) {
@@ -97,6 +127,12 @@ static int gb_render(const uint32_t *pixels, int count, const char *menu) {
         draw_text(frame, 24, "EutherDrive 0.09 - Game Boy / Color - Nichlas Eklof");
         draw_text(frame, 662, "D-pad: move  X: A  O: B  Options: Start  Square: Select");
         draw_text(frame, 690, gb_muted ? "L1+R1: library | Triangle: sound ON | Muted" : "L1+R1: library | Triangle: mute | Stereo 48 kHz");
+#endif
+#ifdef CONSOLE_PLAYER
+        if (player_performance[0]) {
+            ui_panel(frame, 24, 4, 1232, 28, 0xff091119);
+            draw_text_at(frame, 36, 10, player_performance, 0xff5eead4);
+        }
 #endif
     } else {
         ui_panel(frame, 24, 20, 1232, 78, 0xff121c27);
@@ -132,11 +168,20 @@ static int gb_render(const uint32_t *pixels, int count, const char *menu) {
         ui_panel(frame, 24, 644, 1232, 58, 0xff172433);
         draw_text_at(frame, 48, 664, "D-pad: choose    X: play    Triangle: sound    O: exit", 0xffeef6ff);
     }
+#ifdef VULKAN_PLAYER
+prepared:
+#endif
+    ;
     uint64_t now = sceKernelGetProcessTime();
     if (gb_deadline > now && gb_deadline - now < 100000)
         sceKernelUsleep((unsigned)(gb_deadline - now));
     gb_deadline = (gb_deadline && now < gb_deadline + 100000 ? gb_deadline : now) + player_period;
     int ok = 0;
+#ifdef VULKAN_PLAYER
+    ok=menu ? ed_vk_present(frame,1280,720,0,0,1280,720,NULL) :
+        ed_vk_present(pixels,player_width,player_height,player_left,player_top,
+            player_width*player_scale,player_height*player_scale,frame);
+#else
     if (sceVideoOutSubmitFlip(video, index, ORBIS_VIDEO_OUT_FLIP_VSYNC, sequence) >= 0) {
         for (int attempt = 0; attempt < 2000; ++attempt) {
             OrbisVideoOutFlipStatus state = {0};
@@ -146,8 +191,15 @@ static int gb_render(const uint32_t *pixels, int count, const char *menu) {
             sceKernelUsleep(1000);
         }
     }
+#endif
     if (!ok) video = -1; // Do not reuse an in-flight buffer on timeout.
     __atomic_clear(&report_busy, __ATOMIC_RELEASE);
+#ifdef VULKAN_PLAYER
+    if(!ok) {
+        ed_vk_lost=1;
+        report("FAIL Vulkan frame %s result=%d",ed_vk_operation?ed_vk_operation:"unknown",(int)ed_vk_error);
+    }
+#endif
     return ok;
 }
 static int gb_present(const uint32_t *pixels, int count) { return gb_render(pixels, count, NULL); }

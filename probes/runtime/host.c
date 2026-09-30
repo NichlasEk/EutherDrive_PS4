@@ -20,7 +20,11 @@
 #define PROBE_TITLE "EutherDrive Native JIT Rights 0.05"
 #elif defined(GB_PLAYER)
 #ifdef CONSOLE_PLAYER
-#define PROBE_TITLE "EutherDrive Consoles 0.14"
+#ifdef VULKAN_PLAYER
+#define PROBE_TITLE "EutherDrive Vulkan 0.16"
+#else
+#define PROBE_TITLE "EutherDrive Consoles 0.15"
+#endif
 #elif defined(SMS_PLAYER)
 #define PROBE_TITLE "EutherDrive Master System 0.10"
 #else
@@ -40,6 +44,12 @@ static int64_t sequence;
 static char lines[18][100];
 static unsigned line_count;
 static unsigned char report_busy;
+#ifdef VULKAN_PLAYER
+#include "ps4-libc-locks.h"
+#include "vulkan-flip.h"
+#include "vulkan-player.h"
+static int start_vulkan(void);
+#endif
 
 #ifdef GB_PLAYER
 #include "gb-player.h"
@@ -78,6 +88,12 @@ static void display(void) {
     unsigned first = line_count > 18 ? line_count - 18 : 0;
     for (unsigned i = first; i < line_count; ++i)
         draw_text(frame, 85 + (int)(i - first) * 30, lines[i % 18]);
+#ifdef VULKAN_PLAYER
+    if (ed_vk_ready) {
+        if (!ed_vk_lost) ed_vk_present(frame,1280,720,0,0,1280,720,NULL);
+        return;
+    }
+#endif
     if (sceVideoOutSubmitFlip(video, index, ORBIS_VIDEO_OUT_FLIP_VSYNC, sequence) < 0) {
         video = -1;
         return;
@@ -144,6 +160,25 @@ static void init_video(void) {
     if (sceVideoOutRegisterBuffers(video, 0, buffers, 2, &attr) < 0) video = -1;
 }
 
+#ifdef VULKAN_PLAYER
+static int start_vulkan(void) {
+    if (ed_vk_ready) return !ed_vk_lost;
+    if (ed_vk_lost) return 0;
+    report("VULKAN begin; handing VideoOut to OpenGNM");
+    if (video >= 0) sceVideoOutClose(video);
+    video=-1;
+    if (!ed_vk_init()) {
+        ed_vk_lost=1;
+        // Initialization failure: retain partial GPU resources and show CPU diagnostics.
+        init_video();
+        report("FAIL Vulkan init %s result=%d",ed_vk_operation?ed_vk_operation:"unknown",(int)ed_vk_error);
+        return 0;
+    }
+    video=0; // GPU owns the real handle; this is only the frontend-ready marker.
+    report("VULKAN ready: GPU nearest texture scaling 0.16");
+    return 1;
+}
+#endif
 static int resolve(int handle, const char *name, void **destination) {
     *destination = NULL;
     int result = sceKernelDlsym(handle, name, destination);
@@ -390,6 +425,8 @@ static int run_mono(void) {
     add_call("Orbis.Program::NativeReport", (const void *)managed_report);
 #ifdef GB_PLAYER
     add_call("Orbis.Program::NativeInput", (const void *)gb_input);
+    add_call("Orbis.Program::NativeInputError", (const void *)gb_input_error);
+    add_call("Orbis.Program::NativePerformance", (const void *)console_performance);
     add_call("Orbis.Program::NativePresent", (const void *)gb_present);
     add_call("Orbis.Program::NativePreview", (const void *)console_preview);
     add_call("Orbis.Program::NativePresentFrame", (const void *)console_present);
@@ -444,6 +481,9 @@ static void run(void) {
 }
 
 int main(void) {
+#ifdef VULKAN_PLAYER
+    ps4EnableLibcLocks();
+#endif
     sceKernelMkdir("/data/eutherdrive-ps4", 0777);
 #ifdef NATIVE_CREDENTIAL_PROBE
     logfile = sceKernelOpen("/data/eutherdrive-ps4/jit-rights-probe.log", O_WRONLY | O_CREAT | O_TRUNC, 0666);

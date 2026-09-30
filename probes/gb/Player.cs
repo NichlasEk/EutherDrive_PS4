@@ -11,6 +11,17 @@ namespace Orbis {
         private static readonly bool Host = Environment.GetEnvironmentVariable("EUTHERDRIVE_RUNTIME_PROBE_HOST") == "1";
         [MethodImpl(MethodImplOptions.InternalCall)] private static extern void NativeReport(IntPtr text);
         [MethodImpl(MethodImplOptions.InternalCall)] private static extern int NativeInput();
+#if CONSOLE_PLAYER
+        [MethodImpl(MethodImplOptions.InternalCall)] private static extern int NativeInputError();
+        [MethodImpl(MethodImplOptions.InternalCall)] private static extern void NativePerformance(IntPtr text);
+        private static Exception InputError() => new Exception("Controller read failed: 0x"+((uint)NativeInputError()).ToString("X8"));
+        private static void Performance(string text) {
+            IntPtr p=Marshal.StringToHGlobalAnsi(text);
+            try { NativePerformance(p); } finally { Marshal.FreeHGlobal(p); }
+        }
+#else
+        private static Exception InputError() => new Exception("Controller read failed");
+#endif
         [MethodImpl(MethodImplOptions.InternalCall)] private static extern int NativePresent(IntPtr pixels, int count);
         [MethodImpl(MethodImplOptions.InternalCall)] private static extern void NativeClose();
         [MethodImpl(MethodImplOptions.InternalCall)] private static extern int NativeMenu(IntPtr text);
@@ -20,7 +31,7 @@ namespace Orbis {
         #if CONSOLE_PLAYER
         private static int Width => Emulator.Width;
         private static int Height => Emulator.Height;
-        private const string SystemName = "Master System / Mega Drive / SNES", Version = "0.14";
+        private const string SystemName = "Master System / Mega Drive / SNES", Version = "0.15";
         private static bool Supports(string ext) => new[] { ".sms", ".md", ".gen", ".smd", ".sfc", ".smc" }.Contains(ext);
         [MethodImpl(MethodImplOptions.InternalCall)] private static extern int NativePreview(IntPtr pixels, int count, int width, int height);
         [MethodImpl(MethodImplOptions.InternalCall)] private static extern int NativePresentFrame(IntPtr pixels, int count, int width, int height, int period);
@@ -56,10 +67,12 @@ namespace Orbis {
 #if CONSOLE_PLAYER
             long perfStart=System.Diagnostics.Stopwatch.GetTimestamp(), coreTicks=0, audioTicks=0, videoTicks=0;
             int perfFrames=0;
+            long lastPerf=perfStart;
+            Performance("Measuring CPU / audio / video...");
 #endif
             while (true) {
                 int keys = NativeInput();
-                if (keys < 0) throw new Exception("Controller read failed");
+                if (keys < 0) throw InputError();
                 if ((keys & 0xc00) == 0xc00) break;
                 #if !CONSOLE_PLAYER
                 if ((keys & ~previous & 0x1000) != 0) ToggleMute();
@@ -109,6 +122,15 @@ namespace Orbis {
 #if CONSOLE_PLAYER
                 videoTicks+=System.Diagnostics.Stopwatch.GetTimestamp()-phaseStart;
                 ++perfFrames;
+                long now=System.Diagnostics.Stopwatch.GetTimestamp();
+                if(now-lastPerf>=System.Diagnostics.Stopwatch.Frequency*2) {
+                    double frequency=System.Diagnostics.Stopwatch.Frequency;
+                    double ms=1000.0/frequency/perfFrames;
+                    LastPerformance=string.Format("{0:F1} FPS | core {1:F1} audio {2:F1} video {3:F1} ms",
+                        perfFrames*frequency/(now-perfStart),coreTicks*ms,audioTicks*ms,videoTicks*ms);
+                    Performance(LastPerformance);
+                    lastPerf=now;
+                }
 #endif
             }
 #if CONSOLE_PLAYER
@@ -160,7 +182,7 @@ namespace Orbis {
             int page=0, pages=Math.Max(1,(lines.Count+9)/10), previous=NativeInput();
             while(true) {
                 int keys=NativeInput();
-                if(keys<0) throw new Exception("Controller read failed");
+                if(keys<0) throw InputError();
                 int pressed=keys & ~previous; previous=keys;
                 if((pressed & 0x2000)!=0) return;
                 if((pressed & 0x4000)!=0) page=(page+1)%pages;
@@ -200,7 +222,7 @@ namespace Orbis {
             string status = "Choose a game. No battery saves yet.";
             while (true) {
                 int keys = NativeInput();
-                if (keys < 0) throw new Exception("Controller read failed");
+                if (keys < 0) throw InputError();
                 int pressed = keys & ~previous;
                 previous = keys;
                 if ((pressed & 0x2000) != 0) return;

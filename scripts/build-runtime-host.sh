@@ -43,13 +43,28 @@ actual=$(sha256sum "$reference/sce_module/libmonosgen-2.0.prx" | cut -d ' ' -f 1
 [ "$actual" = "$expected" ] || { echo 'Unsupported Mono runtime hash' >&2; exit 1; }
 
 # core_define contains separately selected compiler defines.
+if [ "${ED_VULKAN_PLAYER:-0}" = 1 ]; then
+    stack=${ED_VULKAN_STACK:-$project_dir/../ut99-orbis/build/native}
+    [ -f "$stack/vulkan-ps4/libvulkan_ps4.a" ] && [ -f "$stack/libpsbc-private.a" ] || { echo 'Build the existing native Vulkan stack first' >&2; exit 1; }
+    core_define="$core_define -DVULKAN_PLAYER"
+    cc -Wall -Wextra -Werror "$project_dir/probes/runtime/test-vulkan-flip.c" -o "$output/test-vulkan-flip"
+    "$output/test-vulkan-flip"
+    set -- "$@" --wrap=malloc --wrap=calloc --wrap=realloc --wrap=free --wrap=sceGnmVideoOutSubmitFlipAndWait "$stack/vulkan-ps4/libvulkan_ps4.a" "$stack/opengnm/libopengnm.a" "$stack/libpsbc-private.a" -lc++ -lc++abi -lunwind -lSceGnmDriver
+    sha256sum "$stack/vulkan-ps4/libvulkan_ps4.a" "$stack/opengnm/libopengnm.a" "$stack/libpsbc-private.a" > "$output/vulkan-archives.sha256"
+    # An explicitly selected header tree must match the reused ICD sources.
+    vulkan_include=$stack/Vulkan-Headers/include
+    gnm_include=$stack/opengnm/include
+else
+    vulkan_include=$toolchain/include
+    gnm_include=$toolchain/include
+fi
 # shellcheck disable=SC2086
 clang --target=x86_64-pc-freebsd12-elf -fPIC -funwind-tables -O2 \
-    -DMONO_CREDENTIAL_PROBE $core_define -I"$jbc" -Wall -Wextra -Werror -Wno-unused-function \
+    -DMONO_CREDENTIAL_PROBE $core_define -I"$jbc" -I"$vulkan_include" -I"$gnm_include" -Wall -Wextra -Werror -Wno-unused-function \
     -isysroot "$toolchain" -isystem "$toolchain/include" \
     -c "$project_dir/probes/runtime/host.c" -o "$output/host.o"
 ld.lld -m elf_x86_64 -pie --script "$toolchain/link.x" --eh-frame-hdr \
     -L"$toolchain/lib" "$output/host.o" "$jbc/libut99-jbc.a" "$toolchain/lib/crt1.o" \
-    -lc -lkernel -lSceVideoOut -lSceSysmodule "$@" -o "$output/host.elf"
+    --start-group -lc -lkernel -lSceVideoOut -lSceSysmodule "$@" --end-group -o "$output/host.elf"
 "$toolchain/bin/linux/create-fself" -in="$output/host.elf" \
     -out="$output/host.oelf" --eboot "$output/eboot.bin" --paid 0x3800000000000011

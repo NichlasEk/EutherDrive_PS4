@@ -32,9 +32,16 @@ if [ "${ED_SMS_PLAYER:-0}" = 1 ]; then
 fi
 
 if [ "${ED_CONSOLE_PLAYER:-0}" = 1 ]; then
-    version=0.14
-    package_name=eutherdrive-console-player-0.14.pkg
+    version=0.15
+    package_name=eutherdrive-console-player-0.15.pkg
     title='EutherDrive Consoles'
+fi
+
+if [ "${ED_VULKAN_PLAYER:-0}" = 1 ]; then
+    [ "${ED_CONSOLE_PLAYER:-0}" = 1 ] || { echo 'Vulkan needs ED_CONSOLE_PLAYER=1' >&2; exit 1; }
+    version=0.16
+    package_name=eutherdrive-vulkan-player-0.16.pkg
+    title='EutherDrive Vulkan Test'
 fi
 
 if [ ! -d "$toolchain" ]; then
@@ -51,7 +58,13 @@ done
 
 if [ "${ED_GB_PROBE:-0}" = 1 ]; then
     if [ "${ED_CONSOLE_PLAYER:-0}" = 1 ]; then
-        python3 "$project_dir/scripts/build-console-player.py"
+        if [ -n "${ED_CONSOLE_VALIDATED_MAIN_SHA256:-}" ]; then
+            actual_main=$(sha256sum "$project_dir/build/console-player/host/main.exe" | cut -d ' ' -f 1)
+            [ "$actual_main" = "$ED_CONSOLE_VALIDATED_MAIN_SHA256" ] || { echo 'Validated managed artifact hash mismatch' >&2; exit 1; }
+            [ "$(rg -c '^RESULT PASS$' "$project_dir/build/console-player/host-validation.log")" = 5 ] || { echo 'Expected five validated ROM runs' >&2; exit 1; }
+        else
+            python3 "$project_dir/scripts/build-console-player.py"
+        fi
     elif [ "${ED_SMS_PLAYER:-0}" = 1 ]; then
         python3 "$project_dir/scripts/build-sms-player.py"
     else
@@ -91,6 +104,10 @@ with Image.open(sys.argv[1]) as icon:
     icon.load()
 PY
 cp "$project_dir/assets/icons/icon0.png" "$stage_dir/sce_sys/"
+if [ "${ED_VULKAN_PLAYER:-0}" = 1 ]; then
+    cp "$project_dir"/probes/runtime/licenses/*.txt "$stage_dir/"
+    cp "$build_dir/vulkan-archives.sha256" "$stage_dir/VULKAN-ARCHIVES.txt"
+fi
 if [ "${ED_GB_PROBE:-0}" = 1 ]; then
     cp "$project_dir/probes/gb/THIRD-PARTY-NOTICES.md" "$stage_dir/GB-NOTICES.txt"
 fi

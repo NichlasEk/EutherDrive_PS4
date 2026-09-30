@@ -1,4 +1,62 @@
-# EutherDrive Consoles 0.14 — prestandakandidat
+# EutherDrive Consoles — CPU 0.15 / Vulkan 0.16
+
+**Vulkan-test finns nu:** `dist/eutherdrive-vulkan-player-0.16.pkg`.
+CPU-jämförelse: `dist/eutherdrive-console-player-0.15.pkg`. Båda paketen använder
+exakt samma managed assembly, ROM:ar och kontroller; den native grafikvägen skiljer.
+0.16 är en experimentell variant. Den är byggd/paketvaliderad och shaderlogiken
+är GPU-testad på desktop; PS4-bild, stabilitet och hastighetsvinst återstår.
+
+0.15/0.16 visar FPS och core/audio/video-ms direkt under spelet, uppdaterat var
+annan sekund. Mätningen är genomsnittet sedan spelstart. Fota raden efter cirka
+30 sekunder i samma spel på båda versionerna. Stäng appen före paketbyte.
+Om core dominerar behöver själva C#-kärnan optimeras; GPU-skalning löser den
+separata bildkostnaden. Video inkluderar väntan på frame pacing och vsync.
+
+0.14-fotot visar `Controller read failed`, inte FPS. NativeInput reserverar
+negativa tal för fel, men knappfältet är uint32: extra höga bitar kunde skapa
+ett falskt negativt returvärde. SDK:ns lågbitarsknappar och touchpad filtreras
+nu ut före retur. Test med bit 31 satt och riktiga knappar kvar PASS. Riktigt
+DeviceNotConnected/SendAgain ger neutrala knappar och återhämtning; andra
+läsfel stoppas med exakt felkod. Bilden bevisar inte vilket av dessa fall
+som inträffade på konsolen.
+
+## Vulkan-väg
+
+Återanvänder lokala OpenGNM/vulkan-ps4/PSBC-arkiv från ut99-orbis. Arkivhashar
+sparas i paketet och byggkatalogen; källstacken ändras inte här. All grafik
+går genom Vulkan-API till OpenGNM/GNM; inga Piglet-/Shacc-beroenden.
+CPU-VideoOut stängs vid överlämning, varefter Vulkan äger utmatningen även
+för menyer. Spelbilden laddas upp i sin ursprungliga storlek som BGRA-textur,
+en nearest-filtershader skalar den med samma heltalsskala. Mätfältet är en
+separat liten textur. CPU:n skapar fortfarande emulatorernas spelbilder.
+
+Direkt `vkCmdBlitImage` kan inte skala i den återanvända ICD-versionen;
+shadern undviker den begränsningen. GPU acquire/render-fence väntar högst två
+sekunder. En lokal wrap av OpenGNM:s flip-helper använder också begränsad
+statuspollning och fångar returnerade flip-fel som ICD:n annars ignorerar.
+Resurser behålls till processavslut vid GPU-fel. Allocator-lås aktiveras före
+native/PSBC-trådar; Mono-binär och rättighetsväg är oförändrade.
+
+Desktop offscreen Vulkan/NVIDIA + Khronos validation: åtta pass med full
+921600-pixeljämförelse av sex bildmått, kanalordning, kanter, HUD och byte
+tillbaka från HUD. Inga validation-fel. Det testar shader-/texturlogik med en
+annan ICD; det bevisar inte PS4-ICD/presentation. Native flip-fel/timeout-tester
+och befintliga UI/ljud/credential-tester PASS. GLSL/SPIR-V valideras separat.
+
+```sh
+ED_CONSOLE_PLAYER=1 ED_VULKAN_PLAYER=1 \
+  ED_JBC_DIR=/home/nichlas/ut99-orbis/build/ps4-usb \
+  ED_CONSOLE_LIBRARY="$PWD/build/console-library-0.11.json" \
+  scripts/package-runtime-probe.sh
+```
+
+`ED_VULKAN_STACK` kan välja en annan redan byggd stack. För snabb native-
+jämförelse kan `ED_CONSOLE_VALIDATED_MAIN_SHA256` låsa en redan ROM-testad
+assembly; skriptet kräver samma hash och fem PASS-rader. Vanliga byggen
+kompilerar och ROM-testar alltid om managed-koden. Shaders återskapas med
+`python3 scripts/build-vulkan-shaders.py`.
+
+## Tidigare prestandasteg 0.14
 
 0.13 är den fysiskt fungerande baslinjen, commit `b094d84`. 0.14 minskar
 Mono-loggnivån från debug till warning, undviker per-rad fsync och extra
@@ -62,7 +120,7 @@ ZIP-/specialchip-/BIOS-spel är inte verifierade genom dessa tester.
 Ett tidigare byggt libjbc kan användas med
 `ED_JBC_DIR=/home/nichlas/ut99-orbis/build/ps4-usb`.
 
-Utdata: `dist/eutherdrive-console-player-0.14.pkg`, samma title ID
+Utdata för CPU: `dist/eutherdrive-console-player-0.15.pkg`, samma title ID
 `EDRM00001` som tidigare tester. Installation ersätter den installerade
 GB-testappen. De äldre PKG-filerna bevaras; GB-regressionen förblir körbar.
 Paketet innehåller användarens ROM:ar och är inte en offentlig release.

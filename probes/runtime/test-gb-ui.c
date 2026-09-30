@@ -4,17 +4,21 @@
 #undef main
 #define ORBIS_USER_SERVICE_ERROR_ALREADY_INITIALIZED 0x80960001u
 #define ORBIS_PAD_ERROR_ALREADY_OPENED 0x80920004u
+#define ORBIS_PAD_ERROR_DEVICE_NOT_CONNECTED 0x80920007u
+#define ORBIS_PAD_ERROR_SEND_AGAIN 0x80920105u
 #define ORBIS_PAD_PORT_TYPE_STANDARD 0
 #define ORBIS_VIDEO_OUT_FLIP_VSYNC 1
 typedef struct { uint32_t buttons; int connected; } OrbisPadData;
 typedef struct { int64_t flipArg; } OrbisVideoOutFlipStatus;
 static int pad_connected = 1;
+static int pad_read_result;
+static uint32_t pad_buttons=0x4000;
 static int sceUserServiceInitialize(void *p) { (void)p; return 0; }
 static int sceUserServiceGetInitialUser(int *u) { *u=1; return 0; }
 static int scePadInit(void) { return 0; }
 static int scePadOpen(int u, int t, int i, void *p) { (void)u; (void)t; (void)i; (void)p; return 1; }
 static int scePadGetHandle(int u, int t, int i) { (void)u; (void)t; (void)i; return 1; }
-static int scePadReadState(int h, OrbisPadData *p) { assert(h==1); p->connected=pad_connected; p->buttons=0x4000; return 0; }
+static int scePadReadState(int h, OrbisPadData *p) { assert(h==1); p->connected=pad_connected; p->buttons=pad_buttons; return pad_read_result; }
 static int scePadClose(int h) { assert(h==1); return 0; }
 static uint64_t sceKernelGetProcessTime(void) { static uint64_t tick; return tick += 20000; }
 static int64_t submitted;
@@ -61,8 +65,20 @@ static void check_console_image(int width, int height) {
     }
 }
 int main(void) {
+    console_performance(NULL);
     assert(gb_input()==0x4000);
     pad_connected=0; assert(gb_input()==0);
+    pad_read_result=(int)ORBIS_PAD_ERROR_DEVICE_NOT_CONNECTED;
+    assert(gb_input()==0 && (uint32_t)gb_input_error()==ORBIS_PAD_ERROR_DEVICE_NOT_CONNECTED);
+    pad_read_result=(int)ORBIS_PAD_ERROR_SEND_AGAIN;
+    assert(gb_input()==0);
+    pad_read_result=(int)0x809200FFu;
+    assert(gb_input()==-1 && (uint32_t)gb_input_error()==0x809200FFu);
+    pad_read_result=0; pad_connected=1;
+    assert(gb_input()==0x4000 && gb_input_error()==0 && !gb_pad_transient);
+    pad_buttons=0x80104000u;
+    assert(gb_input()==0x104000 && !gb_input_error());
+    pad_buttons=0x4000;
     static uint32_t pixels[PLAYER_WIDTH*PLAYER_HEIGHT];
     for (int i=0;i<PLAYER_WIDTH*PLAYER_HEIGHT;++i) pixels[i]=0xff000000u+(unsigned)i;
     assert(!gb_present(pixels,1));
@@ -108,6 +124,13 @@ int main(void) {
     check_console_image(256,224);
     check_console_image(320,240);
     check_console_image(640,480);
+#ifdef CONSOLE_PLAYER
+    console_performance("12 FPS | core 70 audio 2 video 8 ms");
+    int before=text_lines;
+    assert(console_present(console_pixels,320*224,320,224,16667));
+    assert(text_lines==before+1);
+    console_performance(NULL); assert(!player_performance[0]);
+#endif
 #ifdef UI_BENCHMARK
     for(int i=0;i<1000;++i)assert(console_present(console_pixels,320*224,320,224,16667));
 #endif
