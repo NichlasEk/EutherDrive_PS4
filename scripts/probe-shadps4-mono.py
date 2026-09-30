@@ -23,12 +23,16 @@ parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--sys-modules', type=Path, help='directory containing your dumped libSceLibcInternal.sprx')
 parser.add_argument('--timeout', type=int, default=25)
 parser.add_argument('--benchmark-rom', type=Path, help='benchmark the packaged managed player with a local ROM')
+parser.add_argument('--benchmark-host', type=Path, help='isolated candidate desktop-host directory; native player staging remains unchanged')
 parser.add_argument('--benchmark-warmup', type=int, default=300)
 parser.add_argument('--benchmark-input', type=Path, help='frame ranges and button masks for reproducible input')
 parser.add_argument('--benchmark-frames', type=int, default=300)
 parser.add_argument('--stress', action='store_true', help='also test concurrent GC and directory enumeration')
 parser.add_argument('--jit-preflight', action='store_true', help='test direct HLE JIT imports, aliasing and execution before Mono')
 args = parser.parse_args()
+if args.benchmark_host and not args.benchmark_rom:
+    parser.error('--benchmark-host requires --benchmark-rom')
+benchmark_host = args.benchmark_host.resolve() if args.benchmark_host else ROOT/'build/console-player/desktop-host'
 if args.benchmark_rom:
     args.benchmark_rom = args.benchmark_rom.resolve()
     if not args.benchmark_rom.is_file() or args.benchmark_frames < 1 or args.benchmark_warmup < 300 or args.stress:
@@ -201,7 +205,7 @@ shutil.copy2(out/'eboot.bin',stage/'eboot.bin')
 reference=Path(subprocess.check_output([str(ROOT/'scripts/prepare-mono-reference.sh')],text=True).strip())
 bcl=reference/'mono/4.5'
 if args.benchmark_rom:
-    shutil.copy2(stage_source/'main.exe', stage/'main.exe')
+    shutil.copy2(benchmark_host/'main.exe' if args.benchmark_host else stage_source/'main.exe', stage/'main.exe')
     guest_rom = '/app0/benchmark' + args.benchmark_rom.suffix.lower()
     (stage/Path(guest_rom).name).symlink_to(args.benchmark_rom)
     guest_input = ''
@@ -225,7 +229,7 @@ if args.benchmark_rom:
     sdk = subprocess.check_output(['dotnet','--list-sdks'], text=True).splitlines()[-1]
     version, sdkroot = re.match(r'(\S+) \[(.+)\]', sdk).groups()
     refs = [Path('/usr/lib/mono/4.5-api')/n for n in ['mscorlib.dll','System.dll','System.Core.dll']]
-    refs += [ROOT/'build/console-player/desktop-host'/n for n in
+    refs += [benchmark_host/n for n in
              ['main.exe','System.Memory.dll','System.Runtime.dll','System.Runtime.InteropServices.dll']]
     # The reference and staged production player must be identical.
     if sha(refs[3]) != sha(stage/'main.exe'):

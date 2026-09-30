@@ -1,8 +1,14 @@
 #!/usr/bin/env python3
 """Build an isolated physical PS4 benchmark package from the validated player."""
-import hashlib,json,os,re,shlex,shutil,subprocess,time
+import argparse,hashlib,json,os,re,shlex,shutil,subprocess,time
 from pathlib import Path
 ROOT=Path(__file__).resolve().parents[1]
+parser=argparse.ArgumentParser(description=__doc__)
+parser.add_argument('--player',type=Path,help='validated candidate main.exe; baseline staging remains unchanged')
+parser.add_argument('--version',default='0.01')
+args=parser.parse_args()
+if not re.fullmatch(r'[0-9]{1,2}\.[0-9]{2}',args.version):parser.error('version must be N.NN')
+if args.player and args.version=='0.01':parser.error('candidate requires a new version')
 SDK=Path(os.environ.get('OO_PS4_TOOLCHAIN','/opt/openorbis/OpenOrbis/PS4Toolchain'))
 BASE=(ROOT/'build/runtime-probe/current-pkgroot').resolve()
 OUT=ROOT/'build/hardware-benchmark'/time.strftime('%Y%m%d-%H%M%S')
@@ -15,6 +21,7 @@ for p in BASE.iterdir():
     if p.suffix=='.pkg' or p.name=='pkg.gp4':continue
     if p.is_dir():shutil.copytree(p,STAGE/p.name)
     else:shutil.copy2(p,STAGE/p.name)
+if args.player:shutil.copy2(args.player,STAGE/'main.exe')
 cases=[('black-belt',0,'sms',1200,'c5accc40','d57eecf7',441000,440010),
        ('alex-kidd',1,'sms',1200,'0af48aea','387bb807',441000,417560),
        ('sonic1',2,'md',1200,'90b13094','45502552',441000,440636),
@@ -33,7 +40,9 @@ source=source.replace('if (frame==warmup+1) {', 'if (frame<=warmup && frame%300=
 version,sdkroot=re.match(r'(\S+) \[(.+)\]',subprocess.check_output(['dotnet','--list-sdks'],text=True).splitlines()[-1]).groups()
 refs=[Path('/usr/lib/mono/4.5-api')/n for n in ['mscorlib.dll','System.dll','System.Core.dll']]
 refs += [STAGE/'main.exe']+[STAGE/'mono/4.5'/n for n in ['System.Memory.dll','System.Runtime.dll','System.Runtime.InteropServices.dll']]
-subprocess.run(['dotnet',str(Path(sdkroot)/version/'Roslyn/bincore/csc.dll'),'-nologo','-nostdlib+','-langversion:latest','-optimize+','-target:exe','-main:MonoBenchmark.Desktop','-out:'+str(STAGE/'benchmark.exe'),*['-r:'+str(p) for p in refs],str(OUT/'Benchmark.cs'),str(ROOT/'probes/benchmark/Suite.cs')],check=True)
+suite_source=OUT/'Suite.cs'
+suite_source.write_text((ROOT/'probes/benchmark/Suite.cs').read_text().replace('automated benchmark 0.01;', 'automated benchmark '+args.version+';'))
+subprocess.run(['dotnet',str(Path(sdkroot)/version/'Roslyn/bincore/csc.dll'),'-nologo','-nostdlib+','-langversion:latest','-optimize+','-target:exe','-main:MonoBenchmark.Desktop','-out:'+str(STAGE/'benchmark.exe'),*['-r:'+str(p) for p in refs],str(OUT/'Benchmark.cs'),str(suite_source)],check=True)
 
 def replace_once(s,old,new):
     assert s.count(old)==1, 'Review native source transformation: '+old
@@ -51,6 +60,7 @@ s=replace_once(s,'    if (logfile >= 0) sceKernelFsync(logfile);\n    for (;;)',
 s=replace_once(s,'static int run_mono(void) {','#include "'+str(ROOT/'probes/benchmark/mono_cases.h')+'"\nstatic int run_mono(void) {')
 s=replace_once(s,'report("05b Mono domain initialized");','report("05b Mono domain initialized");\n    if (!benchmark_case_init(mono)) { jit_cleanup(domain); return 0; }')
 s=replace_once(s,'add_call("MonoBenchmark.Entry::NativeExport", (const void *)benchmark_export);','add_call("MonoBenchmark.Entry::NativeExport", (const void *)benchmark_export);\n    add_call("MonoBenchmark.Entry::NativeRunCase", (const void *)benchmark_run_case);\n    add_call("MonoBenchmark.Entry::NativeCaseConfig", (const void *)benchmark_case_config);')
+s=s.replace('EutherDrive Auto Benchmark 0.01', 'EutherDrive Auto Benchmark '+args.version)
 (OUT/'host.c').write_text(s)
 subprocess.run(['python3',str(ROOT.parent/'ut99-orbis/scripts/build-ps4-usb.py')],check=True)
 jbc=ROOT.parent/'ut99-orbis/build/ps4-usb'
@@ -69,11 +79,14 @@ env=dict(os.environ,ED_CONSOLE_PLAYER='1',ED_VULKAN_PLAYER='1',ED_JBC_DIR=str(jb
 with (OUT/'native-build.log').open('w') as log:subprocess.run(['sh',str(OUT/'build.sh')],env=env,stdout=log,stderr=subprocess.STDOUT,check=True)
 shutil.copy2(OUT/'eboot.bin',STAGE/'eboot.bin')
 info=dict(version='0.01',kind='physical PS4, timed core/audio generation/framebuffer; untimed status screen',git_base=subprocess.check_output(['git','rev-parse','HEAD'],cwd=ROOT,text=True).strip(),player_sha256=sha(STAGE/'main.exe'),mono_sha256=sha(STAGE/'sce_module/libmonosgen-2.0.prx'),suite_sha256=sha(STAGE/'suite.tsv'),sources={str(p.relative_to(ROOT)):sha(p) for p in [ROOT/'probes/consoles/Benchmark.cs',ROOT/'probes/benchmark/Suite.cs',ROOT/'probes/benchmark/usb_bridge.cpp',ROOT/'probes/benchmark/mono_cases.h',ROOT/'scripts/package-benchmark.py']},files={str(p.relative_to(STAGE)):sha(p) for p in STAGE.rglob('*') if p.is_file() and p.name!='param.sfo'})
+info.update(version=args.version,baseline_player_sha256=player_sha,candidate=bool(args.player))
+info['sources'].update({str(p.relative_to(ROOT)):sha(p) for p in [ROOT/'scripts/build-console-player.py',ROOT/'probes/consoles/SmsReadFastPath.cs.txt',ROOT/'probes/consoles/SmsReadDispatch.cs.txt']})
 (STAGE/'build-info.json').write_text(json.dumps(info,indent=2)+'\n')
 shutil.copy2(ROOT/'probes/benchmark/usb/LICENSE',STAGE/'USB-LICENSE.txt')
 pkgtool=SDK/'bin/linux/PkgTool.Core';sfo=STAGE/'sce_sys/param.sfo'
 content='IV0000-EDBM00001_00-EUTHERBENCHMARK1'
 for key,value,size in [('CONTENT_ID',content,48),('TITLE_ID','EDBM00001',12),('TITLE','EutherDrive Auto Benchmark',128),('APP_VER','0.01',8),('VERSION','0.01',8)]:
+    if key in ('APP_VER','VERSION'):value=args.version
     subprocess.run([str(pkgtool),'sfo_setentry',str(sfo),key,'--type','Utf8','--maxsize',str(size),'--value',value],check=True,stdout=subprocess.DEVNULL)
 files=' '.join(str(p.relative_to(STAGE)) for p in STAGE.rglob('*') if p.is_file())
 subprocess.run([str(SDK/'bin/linux/create-gp4'),'-out','pkg.gp4','--content-id='+content,'--files',files],cwd=STAGE,check=True,stdout=subprocess.DEVNULL)
@@ -81,7 +94,7 @@ p=STAGE/'pkg.gp4';s=p.read_text();s=re.sub(r'<dir targ_name="assets">.*?</dir>',
 with (OUT/'package.log').open('w') as log:
     subprocess.run([str(pkgtool),'pkg_build','pkg.gp4','.'],cwd=STAGE,check=True,stdout=log,stderr=subprocess.STDOUT)
     subprocess.run([str(pkgtool),'pkg_validate','--verbose',str(STAGE/(content+'.pkg'))],check=True,stdout=log,stderr=subprocess.STDOUT)
-dist=ROOT/'dist/eutherdrive-auto-benchmark-0.01.pkg';shutil.copy2(STAGE/(content+'.pkg'),dist)
+dist=ROOT/('dist/eutherdrive-auto-benchmark-'+args.version+'.pkg');shutil.copy2(STAGE/(content+'.pkg'),dist)
 (dist.with_suffix('.pkg.sha256')).write_text(sha(dist)+'  '+dist.name+'\n')
 link=OUT.parent/'current';link.unlink(missing_ok=True);link.symlink_to(OUT)
 print('Benchmark stage:',STAGE);print('Validated package:',dist);print('SHA256:',sha(dist))

@@ -1,0 +1,41 @@
+        // Experimental PS4 build only. Opt back into all diagnostic/force-read
+        // hooks before starting Mono with EUTHERDRIVE_PS4_SMS_DIAGNOSTICS=1.
+        // Writes and uncommon reads always retain the original implementation.
+        private static readonly bool Ps4SmsReadDiagnostics =
+            Environment.GetEnvironmentVariable("EUTHERDRIVE_PS4_SMS_DIAGNOSTICS") == "1";
+
+        public byte read8(uint in_address)
+        {
+            if (!md_main.g_masterSystemMode || Ps4SmsReadDiagnostics ||
+                (in_address & 0x10000u) != 0)
+                return Read8WithDiagnostics(in_address);
+
+            ushort a = (ushort)in_address;
+            if (a >= 0xC000)
+                return g_ram[a & 0x1FFF];
+
+            // Inspect live state: RAM enable, bank writes and cartridge disable
+            // take effect on the very next read. No cached mapper pointers.
+            if (md_main.g_masterSystemMapper != SmsMapperType.Sega ||
+                !_smsCartridgeEnabled || _smsSegaRamEnabled ||
+                md_main.g_masterSystemRom == null)
+                return Read8WithDiagnostics(in_address);
+
+            int size = md_main.g_masterSystemRomSize;
+            if (size != _ps4SmsRomSize)
+            {
+                _ps4SmsRomSize = size;
+                _ps4SmsPowerOfTwo = size > 0 && (size & (size - 1)) == 0;
+                _ps4SmsRomMask = (uint)(size - 1);
+                _ps4SmsBankMask = (uint)(Math.Max(1, size >> 14) - 1);
+            }
+            if (!_ps4SmsPowerOfTwo)
+                return Read8WithDiagnostics(in_address);
+
+            if (a < 0x0400)
+                return md_main.g_masterSystemRom[(uint)a & _ps4SmsRomMask];
+            uint bank = a < 0x4000 ? _smsBank0 : (a < 0x8000 ? _smsBank1 : _smsBank2);
+            uint index = (((bank & _ps4SmsBankMask) << 14) + (uint)(a & 0x3FFF)) & _ps4SmsRomMask;
+            return md_main.g_masterSystemRom[index];
+        }
+

@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
 """Compile the complete MD engine and KSNES from a pinned, isolated snapshot."""
-import hashlib, json, os, re, shutil, subprocess
+import argparse, hashlib, json, os, re, shutil, subprocess
 from pathlib import Path
 root = Path(__file__).resolve().parent.parent
 source = root.parent / 'EutherDrive_Android'
 revision = '7771ae7f736caef7f20399a6315d3140217bfbd2'
-out = root / 'build/console-player'
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument('--out', type=Path, default=root/'build/console-player')
+parser.add_argument('--sms-fast-read', action='store_true', help='experimental SMS read dispatch without diagnostic hooks')
+args = parser.parse_args()
+out = args.out.resolve()
 out.mkdir(parents=True, exist_ok=True)
 paths = subprocess.check_output(['git','-C',str(source),'ls-tree','-r','--name-only',revision],text=True).splitlines()
 exclude = {'Program.cs','_shims.cs','MdMainStub.cs','MdTracerMainStub.cs','CpuStubs.cs','md_main_setting.cs','MdBusBridge.cs','md_m68k_missing_globals.cs','md_vdp.IO.cs','VdpHeadless.cs','Injector.cs','SystemMananger.cs','MameM68Ec020.cs'}
@@ -43,6 +47,11 @@ for path in paths:
         assert code.count(signature) == 1
         fast = (root/'probes/consoles/SmsReadFastPath.cs.txt').read_text()
         code = code.replace(signature, fast + '        private byte ReadSmsMemoryOriginal(ushort a)')
+        if args.sms_fast_read:
+            signature = '        public byte read8(uint in_address)'
+            assert code.count(signature) == 1
+            dispatch = (root/'probes/consoles/SmsReadDispatch.cs.txt').read_text()
+            code = code.replace(signature, dispatch + '        private byte Read8WithDiagnostics(uint in_address)')
     if path.endswith('/md_main.cs'):
         old = """                if (g_masterSystemMode)
                 {
@@ -108,7 +117,7 @@ for path in paths:
     target=out/'source'/path;target.parent.mkdir(parents=True,exist_ok=True);target.write_bytes(raw)
     hashes[path]=hashlib.sha256(raw).hexdigest()
     resources.append('-resource:'+str(target)+',EutherDrive.Core.Sega32X.BootRoms.'+target.name)
-(out/'source-manifest.json').write_text(json.dumps({'revision':revision,'sha256':hashes},indent=2)+'\n')
+(out/'source-manifest.json').write_text(json.dumps({'revision':revision,'sms_fast_read':args.sms_fast_read,'sha256':hashes},indent=2)+'\n')
 reference = Path(subprocess.check_output([str(root/'scripts/prepare-mono-reference.sh')],text=True).strip())
 bcl = reference / 'mono/4.5'
 sdk = subprocess.check_output(['dotnet','--list-sdks'],text=True).splitlines()[-1]
